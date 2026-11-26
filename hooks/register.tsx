@@ -12,11 +12,12 @@ import type { Fall, Mode, Sim } from '../types'
 import { scene } from './backdrop'
 import { COLOR_PROBLEMS, INK, look } from './look'
 import { logoBadge } from './logo'
+import { COLUMNS, ROWS } from './perch'
 import { CONTRAST, RAIN, horizon, rail } from './scene'
 
-const START: Sim = { world: 0, mode: 'idle', editAt: 0, doneAt: 0, running: 0, loadedBy: 'session start' }
+const START: Sim = { world: 0, mode: 'idle', editAt: 0, doneAt: 0, failAt: 0, running: 0, loadedBy: 'session start' }
 // Change a tag when its fields change: it declines what an earlier version stored.
-export const simAtom = atom({ plugin: 'simulation', key: 'sim' } as const, START, { shape: 'sim-3' })
+export const simAtom = atom({ plugin: 'simulation', key: 'sim' } as const, START, { shape: 'sim-4' })
 export const fallsAtom = atom({ plugin: 'simulation', key: 'falls' } as const, [] as Fall[], { shape: 'falls-1' })
 export const heldAtom = atom({ plugin: 'simulation', key: 'held' } as const, false)
 export const commandAtom = atom({ plugin: 'simulation', key: 'lastCommand' } as const, '')
@@ -27,6 +28,8 @@ export const themeAtom = atom({ plugin: 'simulation', key: 'theme' } as const, '
 const asked = new Map<string, number>()
 
 const PANE = 'console'
+/** The perch's size in cells: the mark in one row, with two cells to spare so it never wraps. */
+const PERCH = { columns: COLUMNS + 2, rows: ROWS.length } as const
 const HOLD_MS = 1000 // each state holds a second, so a burst of calls cannot flicker the world
 
 const READS = new Set(['Read', 'Grep', 'Glob', 'LS', 'WebFetch', 'WebSearch', 'NotebookRead'])
@@ -39,12 +42,13 @@ export const TEST_COMMAND =
  * `zero` clears them. `edit` and `done` stamp the swap's time on `editAt` and `doneAt`;
  * the backdrop plays each once from that time, so a later redraw never replays it.
  */
-type Change = Partial<Omit<Sim, 'world' | 'running' | 'editAt' | 'doneAt'>> & {
+type Change = Partial<Omit<Sim, 'world' | 'running' | 'editAt' | 'doneAt' | 'failAt'>> & {
   steps?: number
   calls?: number
   zero?: boolean
   edit?: boolean
   done?: boolean
+  fail?: boolean
 }
 
 export function kindOf(tool: string, command: string): Fall['kind'] {
@@ -90,6 +94,7 @@ function shift($: EngineInterface, change: Change): Promise<void> {
     // a one-shot set inside the second survives a later change that does not name it
     edit: change.edit ?? pending?.edit,
     done: change.done ?? pending?.done,
+    fail: change.fail ?? pending?.fail,
     steps,
     calls,
     zero,
@@ -105,7 +110,7 @@ async function flush($: EngineInterface) {
   const wait = lastSwap + HOLD_MS - (await $.clock.now())
   if (wait > 0) await $.clock.sleep(wait)
   if (pending === null) return
-  const { steps: n = 0, calls = 0, zero = false, edit, done, ...rest } = pending
+  const { steps: n = 0, calls = 0, zero = false, edit, done, fail, ...rest } = pending
   pending = null
   lastSwap = await $.clock.now()
   const before = await read($, simAtom)
@@ -116,6 +121,7 @@ async function flush($: EngineInterface) {
     running: zero ? 0 : Math.max(0, before.running + calls),
     editAt: edit === true ? lastSwap : before.editAt,
     doneAt: done === true ? lastSwap : before.doneAt,
+    failAt: fail === true ? lastSwap : before.failAt,
   }
   if (JSON.stringify(after) === JSON.stringify(before)) return
   await update($, simAtom, () => after)
@@ -173,7 +179,7 @@ export const register: Register = on => {
     )
 
     if (hasFailed) {
-      void shift($, { mode: 'error', calls: -1 })
+      void shift($, { mode: 'error', fail: true, calls: -1 })
     } else if (kind === 'edit' && ran.deny === undefined) {
       void shift($, { steps: 1, edit: true, loadedBy: fall.label, calls: -1 })
     } else if (kind === 'test') {
@@ -199,37 +205,41 @@ export const register: Register = on => {
     // One Svg, the whole answer, as the app is known to draw it (see backdrop.ts).
     return (
       <Svg
-        source={scene({ mode: sim.mode, running: sim.running, editAge: age(sim.editAt), doneAge: age(sim.doneAt), now: now / 1000, held })}
+        source={scene({ mode: sim.mode, running: sim.running, editAge: age(sim.editAt), doneAge: age(sim.doneAt), failAge: age(sim.failAt), now: now / 1000, held })}
         alt={alt}
         isInteractive
       />
     )
   })
 
-  // The band: the world's state in words, and the hold.
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+  // No band row: with none, the app draws no card above the composer, and the perch below sits
+  // on the composer's top edge in its place (the owner's ask, 26 Nov). The world's state and
+  // the hold live in the console.
+
+  // The perch: the baeYYond mark, floating on the composer's top edge at its right end,
+  // decoding out of binary every ten seconds. A cell of width 0 takes no room; its float counts from the
+  // prompt's right edge, and anchor="above" keeps it on top of the composer as that grows.
+  on('ui.render', { component: 'BesidePrompt' }, async ($, e, next) => {
     const els = $.ui.resolve(e)
-    const { Box, Text, Button } = els
-    const Svg = 'Svg' in els ? els.Svg : undefined
+    if (!('Client' in els) || e.props.floatColumns < PERCH.columns || e.props.floatRows < PERCH.rows) return next(e)
+    const { Box, Client } = els
     const sim = await read($, simAtom)
     const held = await read($, heldAtom)
-    const last = await read($, commandAtom)
-    const theme = await read($, themeAtom)
-    const folder = (await $.session.cwd()).split('/').pop() ?? ''
-
+    const now = await $.clock.now()
     return (
-      <Box flexDirection="row" gap={2} alignItems="center">
-        {Svg !== undefined && <Svg source={logoBadge(sim.mode)} alt="baeYYond" width={80} height={20} />}
-        {theme !== 'drawn' && <Text color={INK.red}>backdrop {theme}</Text>}
-        <Text color={INK.amber}>op@sim ~/{folder} $</Text>
-        <Text color={INK.text}>{last === '' ? ' ' : last}</Text>
-        <Text color={INK.secondary}>rain {bar(RAIN[sim.mode])}</Text>
-        <Text color={INK.secondary}>contrast {CONTRAST[sim.mode].toFixed(1)}</Text>
-        <Text color={sim.mode === 'error' ? INK.red : INK.secondary}>{sim.mode === 'error' ? 'failed' : worldLabel(sim.world)}</Text>
-        <Button key="hold" label={held ? '▶ resume motion' : '❚❚ hold motion'} onPress={() => update($, heldAtom, h => !h)} />
+      <Box width={0}>
+        <Box position="absolute" anchor="above" right={0} width={PERCH.columns} height={PERCH.rows}>
+          <Client key="perch" module="./perch.tsx" props={{ now, mode: sim.mode, held }} width={PERCH.columns} height={PERCH.rows} />
+        </Box>
       </Box>
     )
+  })
+
+  // Nothing above the composer but the perch: other mods' rows (the session's cost, say) are
+  // left out while this theme runs; a survey keeps the whole band.
+  on('ui.render', { component: 'AbovePromptList' }, ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    return next({ ...e, props: { ...e.props, rows: e.props.rows.filter(r => r.plugin === 'simulation') } })
   })
 
   // The console: the eyes of the picture, the rain rail, the log.
@@ -237,7 +247,9 @@ export const register: Register = on => {
     const els = $.ui.resolve(e)
     const { Box, Text } = els
     const Svg = 'Svg' in els ? els.Svg : undefined // the terminal draws the words alone
+    const Button = 'Button' in els ? els.Button : undefined
     const sim = await read($, simAtom)
+    const held = await read($, heldAtom)
     const falls = await read($, fallsAtom)
     const failed = falls.filter(f => f.kind === 'fail').length
     const colour: Record<Fall['kind'], string> = { read: INK.ultra, run: INK.ultra, edit: INK.amber, test: INK.text, fail: INK.red }
@@ -248,6 +260,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1}>
         {Svg !== undefined && <Svg source={logoBadge(sim.mode)} alt="baeYYond" width={200} height={49} />}
+        {Button !== undefined && <Button key="hold" label={held ? '▶ resume motion' : '❚❚ hold motion'} onPress={() => update($, heldAtom, h => !h)} />}
         <Text color={theme === 'drawn' ? INK.muted : INK.red}>
           THEME · {theme} · backdrop asked by {seen === '' ? 'no surface yet' : seen}
         </Text>

@@ -1,3 +1,4 @@
+import Perch, { frame, moving, ROWS, type Cell, type PerchProps } from './perch'
 import { expect, test } from 'claude-code/testing'
 
 import type { Mode } from '../types'
@@ -28,7 +29,7 @@ function engine(on: any, step = 5000) {
 }
 
 const at = (mode: Mode, running: number, extra: Partial<Parameters<typeof scene>[0]> = {}) =>
-  scene({ mode, running, editAge: null, doneAge: null, now: 0, held: false, ...extra })
+  scene({ mode, running, editAge: null, doneAge: null, failAge: null, now: 0, held: false, ...extra })
 
 test('the backdrop, one Svg, stays under the 131,072-character cap in every state', async () => {
   const modes: Mode[] = ['idle', 'working', 'tests', 'error']
@@ -63,9 +64,25 @@ test('a redraw continues the motion where it was', async () => {
   expect(delay(8.5)).toBe('-2.5')
 })
 
-test('a failure turns the third eye and the rain red', async () => {
-  expect(at('error', 0)).toContain('url(#rglow)')
-  expect(at('idle', 0)).not.toContain('url(#rglow)')
+test('the third eye is red, blinks with the two eyes, and a failure turns all three red', async () => {
+  const idle = at('idle', 0)
+  expect(idle.match(/class="lid"/g)?.length).toBe(3)
+  expect(new Set(idle.match(/class="lid" style="animation-delay:[^"]+"/g)).size).toBe(1)
+  expect(idle).toContain('#ff3048')
+  expect(idle).not.toContain('#ff6b80')
+  expect(at('error', 0)).toContain('#ff6b80')
+  // the eyes come after the cap, so darken cannot turn the red blue
+  expect(idle.indexOf('class="lid"')).toBeGreaterThan(idle.indexOf('mix-blend-mode:darken'))
+})
+
+test('the whole picture flashes by itself, and once on an edit, an ended turn or a failure', async () => {
+  const idle = at('idle', 0)
+  expect(idle.match(/class="fl"/g)?.length).toBe(1)
+  expect(idle).not.toContain('class="fo"')
+  expect(idle.indexOf('class="fl"')).toBeGreaterThan(idle.indexOf('mix-blend-mode:darken'))
+  expect(at('error', 0, { failAge: 0.2 })).toContain('fill="#ff4060"')
+  expect(at('idle', 0, { editAge: 0.2 }).match(/class="fo"/g)?.length).toBe(1)
+  expect(at('idle', 0, { doneAge: 5 })).not.toContain('class="fo"')
 })
 
 test('a test command pours and a plain command does not', async () => {
@@ -90,7 +107,7 @@ test('a file edit loads the next frame, named in the console', async ($, on) => 
   await ui.unmount()
 })
 
-test('a failed tool shows on the rail and in the band', async ($, on) => {
+test('a failed tool shows on the rail, and the perch on the composer turns red', async ($, on) => {
   engine(on)
   on('tool.call', () => ({ result: 'exit 1', isError: true }) as never)
   await $.tool.call({ tool: 'Bash', command: 'npm run lint' })
@@ -100,27 +117,25 @@ test('a failed tool shows on the rail and in the band', async ($, on) => {
   expect((await pane.find({ type: 'Text', text: /failed 1/ }))?.text).toMatch(/contrast 0\.1/)
   await pane.unmount()
 
-  const band = await $.ui.mount({
-    plugin: 'simulation', surface: 'desktop', component: 'AbovePrompt',
-    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10 } as never,
+  const cell = await $.ui.mount({
+    plugin: 'simulation', surface: 'desktop', component: 'BesidePrompt',
+    props: { maxColumns: 20, floatRows: 8, floatColumns: 80, isWorking: false } as never,
   })
-  expect((await band.find({ type: 'Text', text: /npm run lint/ }))).toBeDefined()
-  expect((await band.find({ type: 'Text', text: /^failed$/ }))).toBeDefined()
-  await band.unmount()
+  const perch = await cell.find({ type: 'Client' })
+  expect(String(perch?.props.module)).toMatch(/perch\.tsx$/)
+  expect((perch?.props.props as PerchProps).mode).toBe('error')
+  await cell.unmount()
 })
 
-test('the backdrop draws the scene, and hold motion pauses it', async ($, on) => {
+test('the backdrop draws the scene, and hold motion in the console pauses it', async ($, on) => {
   engine(on)
   const BACKDROP = {
     plugin: 'simulation', surface: 'desktop', component: 'Backdrop',
     props: { scene: 'simulation', plugin: 'simulation', glass: false },
   } as const
-  const band = await $.ui.mount({
-    plugin: 'simulation', surface: 'desktop', component: 'AbovePrompt',
-    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10 } as never,
-  })
-  await band.press({ key: 'hold' })
-  await band.unmount()
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'hold' })
+  await pane.unmount()
 
   const ui = await $.ui.mount(BACKDROP)
   const svgs = await ui.findAll({ type: 'Svg' })
@@ -153,10 +168,78 @@ test('an edit sends one ripple from the yogi, and the next call does not replay 
   expect(await ripple()).toBe(false)
 })
 
-test('the mark sits at the centre over the veil, glows, and turns red on a failure', async () => {
+test('the mark sits at the centre over the cap, glows, and turns red on a failure', async () => {
   const rest = at('idle', 0)
   expect(rest).toContain('translate(520 445.2)')
   expect(rest).toContain('filter="url(#lb)"')
-  expect(rest.indexOf('url(#veil)')).toBeLessThan(rest.indexOf('translate(520 445.2)'))
+  expect(rest.indexOf('mix-blend-mode:darken')).toBeLessThan(rest.indexOf('translate(520 445.2)'))
+  expect(rest).not.toContain('url(#veil)')
   expect(at('error', 0)).toContain('#ff4d64')
+})
+
+test('above the composer only the mark stays: other mods\' rows are left out', async ($, on) => {
+  engine(on)
+  const row = (plugin: string) => ({ plugin, tree: { type: 'Text', props: {}, children: [plugin] } })
+  const list = await $.ui.mount({
+    plugin: 'simulation', surface: 'desktop', component: 'AbovePromptList',
+    props: { rows: [row('simulation'), row('session-cost')], hasSurvey: false } as never,
+  })
+  expect(await list.find({ type: 'Text', text: /^simulation$/ })).toBeDefined()
+  expect(await list.find({ type: 'Text', text: /^session-cost$/ })).toBeUndefined()
+  await list.unmount()
+})
+
+test('the perch floats on the composer, and steps aside where there is no room', async ($, on) => {
+  engine(on)
+  const mount = (floatColumns: number) => $.ui.mount({
+    plugin: 'simulation', surface: 'desktop', component: 'BesidePrompt',
+    props: { maxColumns: 20, floatRows: 8, floatColumns, isWorking: false } as never,
+  })
+  const roomy = await mount(80)
+  const float = (await roomy.findAll({ type: 'Box' })).find(b => b.props.position === 'absolute')
+  expect(float?.props.anchor).toBe('above')
+  expect(float?.props.right).toBe(0)
+  expect(await roomy.find({ type: 'Client' })).toBeDefined()
+  await roomy.unmount()
+  const tight = await mount(4)
+  expect(await tight.find({ type: 'Client' })).toBeUndefined()
+  await tight.unmount()
+})
+
+test('the mark decodes out of binary, a light sweeps it, then it rests', async () => {
+  const text = (cells: Cell[][]) => cells.map(r => r.map(c => c.ch).join('')).join('\n')
+  const rest = frame(6000, 'idle')
+  expect(text(rest)).toBe(ROWS.join('\n'))
+  expect(text(rest)).toContain('baeYYond')
+  // at the start of the cycle the cells are bits, and by the end of the decode they are the mark
+  expect(text(frame(50, 'idle'))).toMatch(/[01]/)
+  expect(text(frame(50, 'idle'))).not.toContain('baeYYond')
+  expect(text(frame(1250, 'idle'))).toBe(ROWS.join('\n'))
+  // the sweep lights one column at a time
+  const lit = frame(1900, 'idle').flat().filter(c => c.color === '#eef1ff').length
+  expect(lit).toBeGreaterThan(0)
+  expect(frame(6000, 'idle').flat().some(c => c.color === '#eef1ff')).toBe(false)
+  // red on a failure, and still (the resting mark) when held, at any moment
+  expect(frame(6000, 'error').flat().some(c => c.color === '#ff7d75')).toBe(true)
+  expect(text(frame(50, 'idle', true))).toBe(ROWS.join('\n'))
+  expect(moving(500)).toBe(true)
+  expect(moving(6000)).toBe(false)
+})
+
+test('the perch draws the mark in rows, and holds still when motion is held', async () => {
+  const text = (el: unknown): string => {
+    const n = el as { props?: { children?: unknown } }
+    const kids = n?.props?.children
+    if (typeof kids === 'string') return kids
+    return Array.isArray(kids) ? kids.map(text).join(n === el && (el as { type?: string }).type === 'Box' ? '\n' : '') : ''
+  }
+  const mk = (type: string) => (props: Record<string, unknown>) => ({ type, props })
+  let state: unknown
+  const surface = {
+    elements: { Box: mk('Box'), Text: mk('Text') }, get state() { return state },
+    setState: (s: unknown) => { state = s }, every: () => () => {}, isWindowFocused: true, isMotionReduced: false,
+  } as never
+  // now at 0 is the start of the decode (bits), but a hold draws the resting mark
+  expect(text(Perch({ now: 0, mode: 'idle', held: true }, surface))).toBe(ROWS.join('\n'))
+  expect(text(Perch({ now: 0, mode: 'idle', held: false }, surface))).toMatch(/[01]/)
 })

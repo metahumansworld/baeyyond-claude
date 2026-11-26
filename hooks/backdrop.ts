@@ -11,8 +11,9 @@
 //   in flight; the rain, the light and the mark's glow quicken while work or tests run; a
 //   failed tool turns the third eye, the eyes, the rain and the mark red; an edit sends one
 //   bright ripple from the yogi; a turn's end sends one shooting star.
-// Over the chat column a veil keeps words readable; the mark sits over the veil, held dim
-// enough that text over it keeps 9:1 and muted text 4.5:1 at the glow's peak.
+// Where the words sit, a 'darken' cap keeps the art's shapes but holds its brightest parts
+// down, so the art shows and words stay readable: text 7.5:1, muted 3.7:1 over the brightest
+// patch (measured at 1000x650 with the sidebar open). A flat veil hid the art to do the same.
 //
 // Time is anchored: loops take a negative delay from the clock, and one-shots from their
 // age, so a redraw continues every animation where it was instead of starting it again.
@@ -20,10 +21,16 @@
 import type { Mode } from '../types'
 import { LOGO_D, LOGO_H, LOGO_W } from './logo-path'
 import PICTURE from './trace/picture'
-import { AXIS, CELL, COL, FALLS, GROUND, H, RAIN as RAIN_COLUMNS, ROWS, SPHERES, STARS, W } from './trace/parts'
+import { AXIS, CELL, FALLS, GROUND, H, RAIN as RAIN_COLUMNS, ROWS, SPHERES, STARS, W } from './trace/parts'
 
-/** How strongly the veil darkens the chat column: 0.88 passes the text floor, 0.75 does not. */
-export const VEIL = 0.88
+/** How strongly the veil darkens the band where the chat's words sit (0: no veil). */
+export const VEIL = 0
+/** The brightest the art may be inside that band: a 'darken' blend caps each part of the
+ *  picture at this color and leaves everything darker as it is. null: no cap. */
+export const CLAMP: string | null = '#1f2a78'
+/** Where the words sit, in the picture's frame: measured from the app with its sidebar open
+ *  (the backdrop spans the whole window; the words run from 28% to 88% of its width). */
+export const VEIL_BAND = { x0: 440, x1: 1420 }
 
 /** The mark's width in the picture's frame (1600 wide), and how bright each part of it is. */
 export const LOGO_SPAN = 560
@@ -45,13 +52,23 @@ export type SceneState = {
   editAge: number | null
   /** Seconds since the last turn ended, or null for none. */
   doneAge: number | null
+  /** Seconds since a tool last failed, or null for none. */
+  failAge?: number | null
   /** The clock, in seconds: loops are anchored to it. */
   now: number
   held: boolean
 }
 
+/** Where the third eye sits on the brow, on the axis. */
+const THIRD_EYE_Y = 270
 const EDIT_S = 3.2
 const DONE_S = 1.8
+/** One flash of the whole picture: a quick rise and a slow fall, never more than one a second. */
+const FLASH_S = 1.6
+/** The picture flashes by itself this often, in seconds, besides on events. */
+const FLASH_EVERY = 30
+/** All three eyes close and open together on this cycle, in seconds. */
+const BLINK_S = 10
 const f1 = (n: number) => Math.round(n * 10) / 10
 
 export function scene(st: SceneState): string {
@@ -75,10 +92,10 @@ export function scene(st: SceneState): string {
     `<radialGradient id="glow"><stop offset="0" stop-color="#e8eeff"/><stop offset=".35" stop-color="#9fb2ff" stop-opacity=".55"/><stop offset="1" stop-color="#5f7cff" stop-opacity="0"/></radialGradient>` +
     `<radialGradient id="rglow"><stop offset="0" stop-color="#ffd6db"/><stop offset=".35" stop-color="#ff4d64" stop-opacity=".6"/><stop offset="1" stop-color="#ff2040" stop-opacity="0"/></radialGradient>` +
     `<radialGradient id="core"><stop offset="0" stop-color="#dfe6ff" stop-opacity=".8"/><stop offset=".4" stop-color="#7d90ff" stop-opacity=".35"/><stop offset="1" stop-color="#3f52d8" stop-opacity="0"/></radialGradient>` +
-    `<radialGradient id="halo"><stop offset="0" stop-color="${err ? '#ff4d64' : '#8a9cff'}" stop-opacity=".7"/><stop offset=".55" stop-color="${err ? '#ff2040' : '#3f52d8'}" stop-opacity=".28"/><stop offset="1" stop-color="#1a2290" stop-opacity="0"/></radialGradient>` +
     `<linearGradient id="veil" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${GROUND}" stop-opacity="0"/><stop offset=".07" stop-color="${GROUND}" stop-opacity="${VEIL}"/><stop offset=".93" stop-color="${GROUND}" stop-opacity="${VEIL}"/><stop offset="1" stop-color="${GROUND}" stop-opacity="0"/></linearGradient>` +
     `<filter id="lb" x="-30%" y="-80%" width="160%" height="260%"><feGaussianBlur stdDeviation="26"/></filter>` +
     `<filter id="lc" x="-10%" y="-40%" width="120%" height="180%"><feGaussianBlur stdDeviation="7"/></filter>` +
+    `<filter id="eg" x="-150%" y="-300%" width="400%" height="700%"><feGaussianBlur stdDeviation="5"/></filter>` +
     `<g id="mk" transform="translate(0 ${LOGO_H}) scale(.1 -.1)"><path d="${LOGO_D}"/></g>` +
     `</defs><style>` +
     `.fall{fill:none;stroke:#dfe6ff;stroke-linecap:round;stroke-dasharray:3 10;opacity:.5;animation:fall linear infinite}@keyframes fall{from{stroke-dashoffset:26}to{stroke-dashoffset:0}}` +
@@ -94,8 +111,9 @@ export function scene(st: SceneState): string {
     `.orb{animation:orb 2.6s linear infinite}@keyframes orb{from{transform:translateY(0);opacity:0}10%{opacity:1}90%{opacity:1}to{transform:translateY(-640px);opacity:0}}` +
     `.burst{fill:none;stroke:#eef2ff;animation:burst ${EDIT_S}s ease-out both;transform-box:fill-box;transform-origin:center}@keyframes burst{from{transform:scale(.1);opacity:1;stroke-width:6}to{transform:scale(1);opacity:0;stroke-width:1}}` +
     `.shoot{animation:shoot ${DONE_S}s ease-in both}@keyframes shoot{from{transform:translate(0,0);opacity:0}15%{opacity:1}to{transform:translate(-720px,260px);opacity:0}}` +
-    `.eye{animation:eye 3s ease-in-out infinite}@keyframes eye{0%,100%{opacity:.5}50%{opacity:1}}` +
-    `.halo{mix-blend-mode:screen;animation:halo ${f1(8 * speed)}s ease-in-out infinite}@keyframes halo{0%,100%{opacity:.45}50%{opacity:.9}}` +
+    `.lid{animation:lid ${BLINK_S}s ease-in-out infinite;transform-box:fill-box;transform-origin:center}@keyframes lid{0%,100%{transform:scaleY(.06)}25%,70%{transform:scaleY(1)}}` +
+    `.fl{mix-blend-mode:screen;animation:fl ${FLASH_EVERY}s ease-out infinite}@keyframes fl{0%,100%{opacity:0}1.5%{opacity:.3}5%{opacity:0}}` +
+    `.fo{mix-blend-mode:screen;animation:fo ${FLASH_S}s ease-out both}@keyframes fo{0%{opacity:0}20%{opacity:.38}100%{opacity:0}}` +
     `.lg{animation:lg ${markPer}s ease-in-out infinite}@keyframes lg{0%,100%{opacity:${GLOW.low}}50%{opacity:${GLOW.high}}}` +
     (st.held ? `*{animation-play-state:paused!important}` : '') +
     `@media (prefers-reduced-motion: reduce){*{animation:none!important}}` +
@@ -128,8 +146,8 @@ export function scene(st: SceneState): string {
   // the axis beam, its spheres and the third eye
   s += `<rect class="beam" x="${AXIS - 2}" y="0" width="4" height="${H}" fill="url(#beam)" opacity=".5" style="animation-delay:${loop(6)}"/>`
   ;(SPHERES as unknown as [number, number][]).forEach(([y, r], i) => {
-    const red = err && y === 270
-    s += `<circle class="sph" cx="${AXIS}" cy="${y}" r="${f1(r * 2.4)}" fill="url(#${red ? 'rglow' : 'glow'})" opacity=".7" style="animation-delay:${loop(4, i * 0.21)}"/>`
+    if (y === THIRD_EYE_Y) return // the third eye is drawn as an eye, over the cap
+    s += `<circle class="sph" cx="${AXIS}" cy="${y}" r="${f1(r * 2.4)}" fill="url(#glow)" opacity=".7" style="animation-delay:${loop(4, i * 0.21)}"/>`
   })
   // light climbing from the yogi to the third eye, always
   for (let i = 0; i < 3; i++) {
@@ -141,10 +159,6 @@ export function scene(st: SceneState): string {
     s += `<circle class="orb" cx="${AXIS}" cy="808" r="9" fill="url(#glow)" opacity="0" style="animation-delay:${loop(2.6, i / orbs)}"/>`
   }
 
-  // the eyes of both halves
-  for (const [x, y] of [[722, 366], [872, 366]] as const) {
-    s += `<ellipse class="eye" cx="${x}" cy="${y}" rx="11" ry="4" fill="${err ? '#ff6b80' : '#e8eeff'}" opacity=".6" style="animation-delay:${loop(3)}"/>`
-  }
 
   // one-shots, continued at their age and gone once played
   if (st.editAge !== null && st.editAge >= 0 && st.editAge < EDIT_S) {
@@ -162,11 +176,36 @@ export function scene(st: SceneState): string {
   }
   s += '</g>'
 
-  // the halo: the figure glows, breathing with the work, under the veil so words stay readable
-  s += `<ellipse class="halo" cx="${AXIS}" cy="470" rx="430" ry="500" fill="url(#halo)" style="animation-delay:${loop(8 * speed)}"/>`
 
-  // the veil, over everything in the chat column
-  s += `<rect x="${COL.x0 - 60}" y="0" width="${COL.x1 - COL.x0 + 120}" height="${H}" fill="url(#veil)"/>`
+  // the veil and the cap, over everything in the band where the words sit
+  const band = `x="${VEIL_BAND.x0 - 60}" y="0" width="${VEIL_BAND.x1 - VEIL_BAND.x0 + 120}" height="${H}"`
+  if (VEIL > 0) s += `<rect ${band} fill="url(#veil)"/>`
+  if (CLAMP !== null) {
+    s += `<linearGradient id="cap" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff"/><stop offset=".07" stop-color="${CLAMP}"/><stop offset=".93" stop-color="${CLAMP}"/><stop offset="1" stop-color="#fff"/></linearGradient>`
+    s += `<rect ${band} fill="url(#cap)" style="mix-blend-mode:darken"/>`
+  }
+
+  // the whole picture flashes: by itself every half minute, and once on an edit, a turn's
+  // end (pale) or a failure (red); over the cap so the middle flashes too, gently enough
+  // that words stay readable at the peak (each flash is one rise and fall, never 3 a second)
+  s += `<rect class="fl" width="${W}" height="${H}" fill="#9fb0ff" opacity="0" style="animation-delay:${loop(FLASH_EVERY)}"/>`
+  const events: [number | null | undefined, string][] = [[st.editAge, '#b8c6ff'], [st.doneAge, '#9fb0ff'], [st.failAge, '#ff4060']]
+  for (const [a, colour] of events) {
+    if (a !== null && a !== undefined && a >= 0 && a < FLASH_S) {
+      s += `<rect class="fo" width="${W}" height="${H}" fill="${colour}" opacity="0" style="animation-delay:${once(a)}"/>`
+    }
+  }
+
+  // the three eyes, over the cap so the red stays red: they close and open together, the
+  // third eye on the brow glowing red, and the two eyes turning red too when a tool fails
+  const lid = `style="animation-delay:${loop(BLINK_S)}"`
+  const eye = (x: number, y: number, rx: number, ry: number, colour: string, turn = 0) =>
+    `<g transform="translate(${x} ${y}) rotate(${turn})"><g class="lid" ${lid}>` +
+    `<ellipse rx="${rx * 1.9}" ry="${ry * 2.4}" fill="${colour}" opacity=".55" filter="url(#eg)"/>` +
+    `<path d="M${-rx} 0Q0 ${-ry * 1.6} ${rx} 0Q0 ${ry * 1.6} ${-rx} 0Z" fill="${colour}" opacity=".9"/>` +
+    `</g></g>`
+  const pair = err ? '#ff6b80' : '#dfe6ff'
+  s += eye(722, 366, 13, 5, pair) + eye(872, 366, 13, 5, pair) + eye(AXIS, THIRD_EYE_Y, 12, 5, '#ff3048', 90)
 
   // the mark, over the veil: a wide breathing glow, a near glow, and the mark itself
   s +=

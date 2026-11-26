@@ -11,6 +11,8 @@ export type Sim = {
   editAt: number
   /** When a turn last ended, in `$.clock.now()` ms (0: never): one shooting star. */
   doneAt: number
+  /** When a tool last failed, in `$.clock.now()` ms (0: never): one red flash. */
+  failAt: number
   /** Tool calls in flight, one orb each. */
   running: number
   /** The tool call that loaded this world, for the console. */
