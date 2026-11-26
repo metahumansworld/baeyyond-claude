@@ -2,7 +2,8 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Mode } from '../types'
 import { kindOf } from './register'
-import { LAYERS, motion } from './backdrop'
+import { scene } from './backdrop'
+import { logoBadge } from './logo'
 
 const PANE = {
   plugin: 'simulation',
@@ -26,24 +27,25 @@ function engine(on: any, step = 5000) {
   on('session.cwd', () => ({ value: '/work/matrix-sim' }))
 }
 
-const at = (mode: Mode, running: number, extra: Partial<Parameters<typeof motion>[0]> = {}) =>
-  motion({ mode, running, editAge: null, doneAge: null, now: 0, held: false, ...extra })
+const at = (mode: Mode, running: number, extra: Partial<Parameters<typeof scene>[0]> = {}) =>
+  scene({ mode, running, editAge: null, doneAge: null, now: 0, held: false, ...extra })
 
-test('every Svg of the backdrop stays under the 131,072-character cap', async () => {
+test('the backdrop, one Svg, stays under the 131,072-character cap in every state', async () => {
   const modes: Mode[] = ['idle', 'working', 'tests', 'error']
-  let largest = Math.max(...LAYERS.map(l => l.length))
+  let largest = 0
   for (const mode of modes) {
     for (let running = 0; running <= 6; running++) {
       largest = Math.max(largest, at(mode, running, { editAge: 0, doneAge: 0, held: true, now: 12345.6 }).length)
     }
   }
-  expect(LAYERS).toHaveLength(7)
   expect(largest).toBeLessThan(131072)
 })
 
 test('the backdrop keeps no picture, font or script', async () => {
-  for (const svg of [...LAYERS, at('tests', 3, { editAge: 1, doneAge: 1 })]) {
-    expect(/<image|<script|<foreignObject|href|@import|<!\[CDATA|\\/.test(svg)).toBe(false)
+  for (const svg of [at('tests', 3, { editAge: 1, doneAge: 1 }), at('error', 0), logoBadge('idle')]) {
+    expect(/<image|<script|<foreignObject|@import|<!\[CDATA|\\/.test(svg)).toBe(false)
+    // the only href is the mark's own, a local fragment
+    expect(svg.replace(/<use href="#mk"\/>/g, '')).not.toContain('href')
   }
 })
 
@@ -122,8 +124,9 @@ test('the backdrop draws the scene, and hold motion pauses it', async ($, on) =>
 
   const ui = await $.ui.mount(BACKDROP)
   const svgs = await ui.findAll({ type: 'Svg' })
-  expect(svgs).toHaveLength(8)
-  expect(String(svgs[7]?.props.source)).toContain('animation-play-state:paused')
+  expect(svgs).toHaveLength(1)
+  expect(svgs[0]?.props.isInteractive).toBe(true)
+  expect(String(svgs[0]?.props.source)).toContain('animation-play-state:paused')
   await ui.unmount()
 })
 
@@ -138,7 +141,7 @@ test('an edit sends one ripple from the yogi, and the next call does not replay 
     const ui = await $.ui.mount(BACKDROP)
     const svgs = await ui.findAll({ type: 'Svg' })
     await ui.unmount()
-    return String(svgs[svgs.length - 1]?.props.source).includes('class="burst"')
+    return String(svgs[0]?.props.source).includes('class="burst"')
   }
 
   await $.tool.call({ tool: 'Edit', file_path: '/repo/src/sun.ts', old_string: 'a', new_string: 'b' })
@@ -148,4 +151,12 @@ test('an edit sends one ripple from the yogi, and the next call does not replay 
   await $.tool.call({ tool: 'Grep', pattern: 'sun' })
   await settle()
   expect(await ripple()).toBe(false)
+})
+
+test('the mark sits at the centre over the veil, glows, and turns red on a failure', async () => {
+  const rest = at('idle', 0)
+  expect(rest).toContain('translate(520 445.2)')
+  expect(rest).toContain('filter="url(#lb)"')
+  expect(rest.indexOf('url(#veil)')).toBeLessThan(rest.indexOf('translate(520 445.2)'))
+  expect(at('error', 0)).toContain('#ff4d64')
 })

@@ -1,5 +1,5 @@
 // simulation: a CLI in a real room, and behind it the owner's picture of Ardhanarishvara,
-// traced, alive and under binary rain (see backdrop.ts).
+// traced, alive and under binary rain, with baeYYond glowing at its centre (see backdrop.ts).
 // Ultramarine is the simulation, white is the one who runs it, amber is the real,
 // red is a failure. Each tool call in flight is an orb rising the axis of light, work
 // and tests quicken the rain, a file edit sends a ripple from the yogi and loads the
@@ -9,8 +9,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Fall, Mode, Sim } from '../types'
-import { LAYERS, motion } from './backdrop'
+import { scene } from './backdrop'
 import { COLOR_PROBLEMS, INK, look } from './look'
+import { logoBadge } from './logo'
 import { CONTRAST, RAIN, horizon, rail } from './scene'
 
 const START: Sim = { world: 0, mode: 'idle', editAt: 0, doneAt: 0, running: 0, loadedBy: 'session start' }
@@ -19,6 +20,11 @@ export const simAtom = atom({ plugin: 'simulation', key: 'sim' } as const, START
 export const fallsAtom = atom({ plugin: 'simulation', key: 'falls' } as const, [] as Fall[], { shape: 'falls-1' })
 export const heldAtom = atom({ plugin: 'simulation', key: 'held' } as const, false)
 export const commandAtom = atom({ plugin: 'simulation', key: 'lastCommand' } as const, '')
+/** What the last $.theme.set answered: 'drawn', or why nothing draws the theme. */
+export const themeAtom = atom({ plugin: 'simulation', key: 'theme' } as const, 'not set yet')
+
+// Which surfaces have asked for the backdrop, and when (module memory: a reload clears it).
+const asked = new Map<string, number>()
 
 const PANE = 'console'
 const HOLD_MS = 1000 // each state holds a second, so a burst of calls cannot flicker the world
@@ -58,14 +64,18 @@ let queue: Promise<void> = Promise.resolve()
 let hasSound = true
 
 async function setLook($: EngineInterface, mode: Mode) {
+  let result
   try {
-    await $.theme.set(look(mode, hasSound))
+    result = await $.theme.set(look(mode, hasSound))
   } catch (error) {
     if (!hasSound) throw error
     hasSound = false // a build that takes no sound: keep the look without it
     $.ui.log(`simulation: sound left out: ${String(error)}`)
-    await $.theme.set(look(mode, false))
+    result = await $.theme.set(look(mode, false))
   }
+  const said = result.isDrawn ? 'drawn' : `not drawn: ${result.reason}`
+  if (!result.isDrawn) $.ui.log(`simulation: theme ${said}`)
+  await update($, themeAtom, () => said)
 }
 
 // Apply a change to the world, held to one swap a second. Changes that come
@@ -178,41 +188,40 @@ export const register: Register = on => {
   // The world itself.
   on('ui.render', { component: 'Backdrop' }, async ($, e, next) => {
     if ((e.surface !== 'desktop' && e.surface !== 'mobile') || e.props.plugin !== $.plugin.name) return next(e)
-    const { Box, Svg } = $.ui.resolve(e)
+    const { Svg } = $.ui.resolve(e)
     const sim = await read($, simAtom)
     const held = await read($, heldAtom)
     const now = await $.clock.now()
+    asked.set(e.surface, now)
     const age = (at: number) => (at > 0 ? (now - at) / 1000 : null)
-    const source = motion({ mode: sim.mode, running: sim.running, editAge: age(sim.editAt), doneAge: age(sim.doneAt), now: now / 1000, held })
-    const alt = `Ardhanarishvara, half Shiva and half Parvati, above a meditating yogi, among galaxies and floating mountains with waterfalls, under binary rain at level ${RAIN[sim.mode]}, with ${sim.running} orbs rising the axis of light`
-    // Seven still layers of the traced picture, then the motion, stacked over the window.
-    // All are drawn as images: an image takes its markup's size and its CSS animation runs,
-    // while an interactive frame inside a Box took no size and showed nothing.
-    const layer = (svg: string, label: string) => (
-      <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-        <Svg source={svg} alt={label} />
-      </Box>
-    )
+    const alt = `Ardhanarishvara, half Shiva and half Parvati, above a meditating yogi, among galaxies and floating mountains with waterfalls, under binary rain at level ${RAIN[sim.mode]}, with ${sim.running} orbs rising the axis of light, and baeYYond glowing at the centre`
 
+    // One Svg, the whole answer, as the app is known to draw it (see backdrop.ts).
     return (
-      <Box position="relative" width="100%" height="100%">
-        {LAYERS.map((svg, i) => layer(svg, i === 0 ? alt : `the picture, part ${i + 1} of ${LAYERS.length}`))}
-        {layer(source, 'galaxies turning, waterfalls, ripples and binary rain')}
-      </Box>
+      <Svg
+        source={scene({ mode: sim.mode, running: sim.running, editAge: age(sim.editAt), doneAge: age(sim.doneAt), now: now / 1000, held })}
+        alt={alt}
+        isInteractive
+      />
     )
   })
 
   // The band: the world's state in words, and the hold.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const { Box, Text, Button } = els
+    const Svg = 'Svg' in els ? els.Svg : undefined
     const sim = await read($, simAtom)
     const held = await read($, heldAtom)
     const last = await read($, commandAtom)
+    const theme = await read($, themeAtom)
     const folder = (await $.session.cwd()).split('/').pop() ?? ''
 
     return (
-      <Box flexDirection="row" gap={2}>
+      <Box flexDirection="row" gap={2} alignItems="center">
+        {Svg !== undefined && <Svg source={logoBadge(sim.mode)} alt="baeYYond" width={80} height={20} />}
+        {theme !== 'drawn' && <Text color={INK.red}>backdrop {theme}</Text>}
         <Text color={INK.amber}>op@sim ~/{folder} $</Text>
         <Text color={INK.text}>{last === '' ? ' ' : last}</Text>
         <Text color={INK.secondary}>rain {bar(RAIN[sim.mode])}</Text>
@@ -232,9 +241,16 @@ export const register: Register = on => {
     const falls = await read($, fallsAtom)
     const failed = falls.filter(f => f.kind === 'fail').length
     const colour: Record<Fall['kind'], string> = { read: INK.ultra, run: INK.ultra, edit: INK.amber, test: INK.text, fail: INK.red }
+    const theme = await read($, themeAtom)
+    const now = await $.clock.now()
+    const seen = [...asked].map(([surface, at]) => `${surface} ${Math.round((now - at) / 1000)}s ago`).join(', ')
 
     return (
       <Box flexDirection="column" gap={1}>
+        {Svg !== undefined && <Svg source={logoBadge(sim.mode)} alt="baeYYond" width={200} height={49} />}
+        <Text color={theme === 'drawn' ? INK.muted : INK.red}>
+          THEME · {theme} · backdrop asked by {seen === '' ? 'no surface yet' : seen}
+        </Text>
         <Text color={INK.muted}>EYES · {worldLabel(sim.world)} · loaded by {sim.loadedBy}</Text>
         {Svg !== undefined && <Svg source={horizon(sim.mode)} alt={sim.mode === 'error' ? 'The eyes of Ardhanarishvara, red: a tool failed' : 'The eyes and the third eye of Ardhanarishvara'} width={328} height={70} />}
         <Text color={INK.muted}>RAIN RAIL · one lane per tool call</Text>

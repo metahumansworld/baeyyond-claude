@@ -33,6 +33,7 @@ declare module 'claude-code' {
       falls: Shaped<Fall[]>
       held: boolean
       lastCommand: string
+      theme: string
     }
   }
 }
