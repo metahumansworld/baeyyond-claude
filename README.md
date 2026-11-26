@@ -39,3 +39,7 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 The traced picture in `hooks/trace/` and the mark in `hooks/logo-path.ts` are generated with potrace and are not meant to be edited by hand.
 
 A backdrop must be one `Svg` filling the window: an earlier version stacked seven SVGs in positioned boxes, and the app drew nothing.
+
+## Licence
+
+The code is MIT (see `LICENSE`). The baeYYond name and mark are not covered by it: all rights to them are reserved.

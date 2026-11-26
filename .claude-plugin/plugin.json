@@ -1,1 +1,7 @@
-{ "name": "simulation", "version": "0.3.0", "description": "A CLI simulation behind the Claude Code desktop chat: a traced Ardhanarishvara in ultramarine, alive with turning galaxies, waterfalls and binary rain, answering every tool call, edit, failure and finished turn.", "types": "./types/index.d.ts" }
+{
+  "name": "simulation",
+  "version": "0.3.0",
+  "description": "A CLI simulation behind the Claude Code desktop chat: a traced Ardhanarishvara in ultramarine, alive with turning galaxies, waterfalls and binary rain, answering every tool call, edit, failure and finished turn.",
+  "types": "./types/index.d.ts",
+  "license": "MIT"
+}
