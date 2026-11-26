@@ -1,0 +1,5 @@
+{
+  "name": "baeyyond-claude",
+  "owner": { "name": "metahumansworld" },
+  "plugins": [{ "name": "simulation", "source": "./" }]
+}
