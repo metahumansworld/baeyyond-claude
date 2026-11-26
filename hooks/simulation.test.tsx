@@ -4,6 +4,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Mode } from '../types'
 import { kindOf } from './register'
 import { FLOOR, scene } from './backdrop'
+import { PACE, RAIN_INK, encodeCells, rainCells } from './rain'
 import { COLORS, INK } from './look'
 import { logoBadge } from './logo'
 
@@ -268,4 +269,62 @@ test('the composer\'s ring is the rain\'s blue, not amber', () => {
   const dark = (COLORS as unknown as { inputs: { dark: Record<string, string> } }).inputs.dark
   expect(dark['role-accent-fill']).toBe('#576df2')
   expect(INK.rain).toBe('#5f7cff')
+})
+
+test('the terminal rain: binary streams in the art\'s blues, blank elsewhere, red after a failure, moving', () => {
+  const cols = 60
+  const rows = 20
+  const frame = rainCells(cols, rows, 40, 'idle')
+  expect(frame.length).toBe(cols * rows * 3)
+  const blue = new Set<number>(RAIN_INK.blue)
+  let drops = 0
+  for (let i = 0; i < cols * rows; i++) {
+    const [ch, fg, bg] = [frame[i * 3] ?? -1, frame[i * 3 + 1] ?? -1, frame[i * 3 + 2] ?? -1]
+    expect(bg).toBe(0x01000000) // never a background: the interface keeps its own
+    if (ch === 0x20) {
+      expect(fg).toBe(0x01000000) // a blank stays unpainted
+    } else {
+      expect(ch === 0x30 || ch === 0x31).toBe(true)
+      expect(blue.has(fg)).toBe(true)
+      drops += 1
+    }
+  }
+  expect(drops).toBeGreaterThan(0)
+  // only some columns carry a stream, and work brings more of them than idle
+  const columnsWith = (cells: Uint32Array) => {
+    const seen = new Set<number>()
+    for (let i = 0; i < cols * rows; i++) if (cells[i * 3] !== 0x20) seen.add(i % cols)
+    return seen.size
+  }
+  expect(columnsWith(frame)).toBeLessThan(cols / 2)
+  expect(PACE.tests.every).toBeLessThan(PACE.idle.every)
+  // a failure turns it red
+  const red = new Set<number>(RAIN_INK.red)
+  const failed = rainCells(cols, rows, 40, 'error')
+  for (let i = 0; i < cols * rows; i++) if (failed[i * 3] !== 0x20) expect(red.has(failed[i * 3 + 1] ?? -1)).toBe(true)
+  // and it falls: a later tick is another frame
+  expect(encodeCells(rainCells(cols, rows, 41, 'idle'))).not.toBe(encodeCells(frame))
+})
+
+test('the rain\'s cells are packed as the Raster wants them: little-endian triplets in padded base64', () => {
+  expect(encodeCells(Uint32Array.of(0x2588, 0xff8800, 0x01000000))).toBe('iCUAAACI/wAAAAAB')
+  expect(encodeCells(Uint32Array.of(0x31))).toBe('MQAAAA==')
+})
+
+test('the terminal draws the rain as one Raster the window\'s size; the desktop app draws none', async ($, on) => {
+  engine(on)
+  on('clock.every', () => ({ value: { cancel: () => undefined } }) as never)
+  const mount = (surface: string) => $.ui.mount({
+    plugin: 'simulation', surface, component: 'Underlay',
+    props: { columns: 70, rows: 22, isWorking: false, view: {} },
+  } as never)
+  const term = await mount('terminal')
+  const raster = await term.find({ type: 'Raster' })
+  expect(raster?.props.columns).toBe(70)
+  expect(raster?.props.rows).toBe(22)
+  expect(String(raster?.props.cells).length).toBe(Math.ceil((70 * 22 * 12) / 3) * 4)
+  await term.unmount()
+  const desk = await mount('desktop')
+  expect(await desk.find({ type: 'Raster' })).toBeUndefined()
+  await desk.unmount()
 })

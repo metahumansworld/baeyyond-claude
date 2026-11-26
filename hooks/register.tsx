@@ -13,6 +13,7 @@ import { scene } from './backdrop'
 import { COLOR_PROBLEMS, INK, look } from './look'
 import { logoBadge } from './logo'
 import { COLUMNS, ROWS } from './perch'
+import { RAIN_MAX, RAIN_TICK, encodeCells, rainCells } from './rain'
 import { CONTRAST, RAIN, horizon, rail } from './scene'
 
 const START: Sim = { world: 0, mode: 'idle', editAt: 0, doneAt: 0, failAt: 0, running: 0, loadedBy: 'session start' }
@@ -26,6 +27,11 @@ export const themeAtom = atom({ plugin: 'simulation', key: 'theme' } as const, '
 
 // Which surfaces have asked for the backdrop, and when (module memory: a reload clears it).
 const asked = new Map<string, number>()
+
+// The terminal rain's last drawing and its clock (module memory: a reload starts it again).
+const rain: { columns: number; rows: number; mode: Mode; busy: boolean; held: boolean; tick: number; timer: unknown } = {
+  columns: 80, rows: 24, mode: 'idle', busy: false, held: false, tick: 0, timer: null,
+}
 
 const PANE = 'console'
 /** The perch's size in cells: the mark in one row, with two cells to spare so it never wraps. */
@@ -78,7 +84,10 @@ async function setLook($: EngineInterface, mode: Mode) {
     result = await $.theme.set(look(mode, false))
   }
   const said = result.isDrawn ? 'drawn' : `not drawn: ${result.reason}`
-  if (!result.isDrawn) $.ui.log(`simulation: theme ${said}`)
+  // said aloud only where an app is attached and still draws nothing: a terminal alone never
+  // draws a theme (its rain is the underlay's), so there it would be noise at every start
+  const inApp = (await $.session.surfaces()).some(s => s !== 'terminal')
+  if (!result.isDrawn && inApp) $.ui.log(`simulation: theme ${said}`)
   await update($, themeAtom, () => said)
 }
 
@@ -240,6 +249,33 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePromptList' }, ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     return next({ ...e, props: { ...e.props, rows: e.props.rows.filter(r => r.plugin === 'simulation') } })
+  })
+
+  // The terminal's rain (rain.ts): a terminal draws no picture, so the simulation falls there as
+  // binary streams in the blanks behind the chat. One Raster the window's size, repainted on a
+  // clock that starts with the first drawing (the terminal alone asks for an underlay); the
+  // drawing itself redraws when the mode, the hold or the window changes.
+  on('ui.render', { component: 'Underlay' }, async ($, e, next) => {
+    if (e.plugin !== $.plugin.name) return next(e)
+    const els = $.ui.resolve(e)
+    if (!('Raster' in els)) return next(e)
+    const { Raster } = els
+    const sim = await read($, simAtom)
+    rain.columns = Math.max(1, Math.min(e.props.columns, RAIN_MAX.columns))
+    rain.rows = Math.max(1, Math.min(e.props.rows, RAIN_MAX.rows))
+    rain.mode = sim.mode
+    rain.busy = e.props.isWorking
+    rain.held = await read($, heldAtom)
+    if (rain.timer === null) {
+      rain.timer = $.clock.every(RAIN_TICK, () => {
+        if (rain.held) return
+        rain.tick += 1
+        const cells = encodeCells(rainCells(rain.columns, rain.rows, rain.tick, rain.mode, rain.busy))
+        void $.ui.blit({ requestId: 'site:underlay', key: 'rain', cells }).catch(() => undefined)
+      })
+    }
+    const cells = encodeCells(rainCells(rain.columns, rain.rows, rain.tick, rain.mode, rain.busy))
+    return <Raster key="rain" columns={rain.columns} rows={rain.rows} cells={cells} />
   })
 
   // The console: the eyes of the picture, the rain rail, the log.

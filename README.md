@@ -14,7 +14,13 @@ Behind the conversation sits a traced picture of Ardhanarishvara, half Shiva and
 - A file edit sends one bright ripple from the yogi and loads the next frame.
 - A finished turn sends one shooting star across the sky.
 
-A veil over the chat column keeps your words readable (text 11.7:1, muted text 5.8:1 on the brightest part of the picture). The band above the prompt has a hold motion button. With Reduce Motion on, the scene rests still. The band and the `/console` pane carry a small glowing baeYYond badge. The console shows the picture's eyes, a rain rail with one lane per tool call, a log, and whether the app is drawing the theme.
+Where your words sit, a darken cap holds the picture's brightest parts down so they stay readable (text 7.5:1, muted text 3.7:1 over the brightest part, measured at 1000x650). At the window's foot the art fades into the composer's own navy, and the composer's ring is the rain's blue, so the prompt reads as part of the picture. The baeYYond mark sits on the composer's top edge: every ten seconds it decodes out of binary and a light sweeps across it. With Reduce Motion on, the scene rests still. The `/console` pane shows the picture's eyes, a rain rail with one lane per tool call, a log, a hold-motion button, a small glowing baeYYond badge, and whether the app is drawing the theme.
+
+## Where it shows
+
+- **Desktop app (Code tab):** everything above, with sound.
+- **Terminal (Claude Code):** a terminal draws no picture, so the rain falls as real `0` and `1` characters in the blank space behind the chat, never over words, red after a failure and faster while work runs, with the mark on the prompt. It needs the default full-screen layout (not `CLAUDE_CODE_NO_FLICKER=0`, and not inside tmux).
+- **Mobile app:** not yet. A session opened on a phone over Remote Control shows the app's own look.
 
 ## Install
 
@@ -38,7 +44,7 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 
 The traced picture in `hooks/trace/` and the mark in `hooks/logo-path.ts` are generated with potrace and are not meant to be edited by hand.
 
-A backdrop must be one `Svg` filling the window: an earlier version stacked seven SVGs in positioned boxes, and the app drew nothing.
+A backdrop must be one `Svg` filling the window: an earlier version stacked seven SVGs in positioned boxes, and the app drew nothing. Glass stays off: with any glass setting, even over a 1 KB scene, the desktop app drew no art at all.
 
 ## Licence
 
