@@ -15,6 +15,12 @@
 // down, so the art shows and words stay readable: text 7.5:1, muted 3.7:1 over the brightest
 // patch (measured at 1000x650 with the sidebar open). A flat veil hid the art to do the same.
 //
+// At the window's foot the art fades into the composer's own navy (FLOOR), measured in points
+// up from the bottom edge, so the app's solid panel behind the composer sits inside the fade at
+// any window size and shows no edge. (Glass, which would show the art through that panel, drew
+// no art at all in the app, even for a 1 KB scene: 26 Nov.) The art keeps its 1600 by 1000 frame
+// inside an outer svg measured in points, which is what lets the floor hold to the bottom edge.
+//
 // Time is anchored: loops take a negative delay from the clock, and one-shots from their
 // age, so a redraw continues every animation where it was instead of starting it again.
 
@@ -35,6 +41,10 @@ export const VEIL_BAND = { x0: 440, x1: 1420 }
 /** The mark's width in the picture's frame (1600 wide), and how bright each part of it is. */
 export const LOGO_SPAN = 560
 export const GLOW = { mark: 0.26, near: 0.18, low: 0.14, high: 0.3 }
+
+/** The floor: the art fades to `color` (the composer's ground, surface-1) over `fade` points and
+ *  stays that color for the last `solid` points of the window, where the composer's panel sits. */
+export const FLOOR = { color: '#070b26', solid: 84, fade: 150 } as const
 
 /** The four galaxies of the picture: centre, size, tilt. */
 const GALAXIES: readonly [number, number, number, number][] = [
@@ -87,7 +97,7 @@ export function scene(st: SceneState): string {
   const markPer = busy ? 3.2 : 6
 
   let s =
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" width="100%" height="100%"><defs>` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" width="100%" height="100%"><defs>` +
     `<linearGradient id="beam" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfd8ff" stop-opacity="0"/><stop offset=".25" stop-color="#cfd8ff" stop-opacity=".9"/><stop offset=".85" stop-color="#cfd8ff" stop-opacity=".9"/><stop offset="1" stop-color="#cfd8ff" stop-opacity="0"/></linearGradient>` +
     `<radialGradient id="glow"><stop offset="0" stop-color="#e8eeff"/><stop offset=".35" stop-color="#9fb2ff" stop-opacity=".55"/><stop offset="1" stop-color="#5f7cff" stop-opacity="0"/></radialGradient>` +
     `<radialGradient id="rglow"><stop offset="0" stop-color="#ffd6db"/><stop offset=".35" stop-color="#ff4d64" stop-opacity=".6"/><stop offset="1" stop-color="#ff2040" stop-opacity="0"/></radialGradient>` +
@@ -215,5 +225,19 @@ export function scene(st: SceneState): string {
     `<g fill="${mark}" opacity="${GLOW.mark}"><use href="#mk"/></g>` +
     `</g>`
 
-  return s + '</svg>'
+  // close the art's frame, then lay the floor over all of it, flashes too, in points
+  return s + '</svg>' + floor() + '</svg>'
+}
+
+/** The fade at the window's foot, in the outer svg's points: a smoothstep from clear to the
+ *  composer's navy over FLOOR.fade, then solid for FLOOR.solid, held to the bottom edge. */
+function floor(): string {
+  const all = FLOOR.solid + FLOOR.fade
+  const stops = [0, 0.2, 0.4, 0.6, 0.8, 1]
+    .map(t => `<stop offset="${((t * FLOOR.fade) / all).toFixed(3)}" stop-color="${FLOOR.color}" stop-opacity="${(t * t * (3 - 2 * t)).toFixed(3)}"/>`)
+    .join('')
+  return (
+    `<defs><linearGradient id="floor" x1="0" y1="0" x2="0" y2="1">${stops}<stop offset="1" stop-color="${FLOOR.color}"/></linearGradient></defs>` +
+    `<rect y="100%" width="100%" height="${all}" transform="translate(0 -${all})" fill="url(#floor)"/>`
+  )
 }

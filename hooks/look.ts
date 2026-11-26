@@ -1,4 +1,5 @@
-// The look: ultramarine for the simulation, amber for the real, red for failure alone.
+// The look: ultramarine for the simulation, red for failure alone. The accent is the rain's own
+// blue, so the composer's ring reads as part of the art (it was amber; amber stays for edited files).
 // Set again on each mode change, so the room's hum follows the work.
 
 import type { ThemeSetArgs, ThemeSound } from 'claude-code'
@@ -7,17 +8,17 @@ import type { Mode } from '../types'
 import { makeColors } from './make-colors.js'
 
 export const INK = {
-  // s1 paints the composer's ground, solid since glass blanks the art: the picture's own navy,
-  // so it reads as part of the art; s2 and s3 sit just above it, as the app requires
+  // s1 paints the composer's ground, solid since glass blanks the art, and the art fades into it
+  // at the window's foot (backdrop.ts FLOOR); s2 and s3 sit just above it, as the app requires
   s0: '#010208', s1: '#070b26', s2: '#080d2b', s3: '#0a1033',
   text: '#e2e6ff', secondary: '#a9b4ff', muted: '#959fe8',
-  edge: '#1c2466', ultra: '#6f80ff', amber: '#ffb347', red: '#ff7d75', ok: '#5fd3b0',
+  edge: '#1c2466', ultra: '#6f80ff', rain: '#5f7cff', amber: '#ffb347', red: '#ff7d75', ok: '#5fd3b0',
 } as const
 
 export const { theme: COLORS, problems: COLOR_PROBLEMS } = makeColors({
   label: 'Simulation',
   only: 'dark',
-  roles: { accent: INK.amber, danger: INK.red, success: INK.ok, warning: '#ffd27a', pro: INK.ultra },
+  roles: { accent: INK.rain, danger: INK.red, success: INK.ok, warning: '#ffd27a', pro: INK.ultra },
   dark: {
     gray: {
       anchors: {
@@ -77,8 +78,8 @@ export function sound(mode: Mode): ThemeSound {
 export function look(mode: Mode, withSound = true): ThemeSetArgs {
   return {
     colors: COLORS,
-    // glass stays off: with any glass on (0.6 blurred, 0.3 clear, as an image, and the default with no filters) the app drew no art,
-    // and with it off the art draws (seen by the owner, 26 Nov)
+    // glass stays off: with any glass on (0.6 blurred, 0.3 clear, as an image, the default with no filters,
+    // and the default over a 1 KB scene) the app drew no art, and with it off the art draws (seen by the owner, 26 Nov)
     backdrop: { scene: 'simulation', glass: false },
     style: STYLE,
     ...(withSound ? { sound: sound(mode) } : {}),

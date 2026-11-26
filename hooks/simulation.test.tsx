@@ -3,7 +3,8 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Mode } from '../types'
 import { kindOf } from './register'
-import { scene } from './backdrop'
+import { FLOOR, scene } from './backdrop'
+import { COLORS, INK } from './look'
 import { logoBadge } from './logo'
 
 const PANE = {
@@ -242,4 +243,29 @@ test('the perch draws the mark in rows, and holds still when motion is held', as
   // now at 0 is the start of the decode (bits), but a hold draws the resting mark
   expect(text(Perch({ now: 0, mode: 'idle', held: true }, surface))).toBe(ROWS.join('\n'))
   expect(text(Perch({ now: 0, mode: 'idle', held: false }, surface))).toMatch(/[01]/)
+})
+
+test('the art fades into the composer\'s navy at the window\'s foot, over everything, so its panel shows no edge', () => {
+  const s = at('idle', 0, { doneAge: 0.2 })
+  // the art keeps its own frame inside an outer svg measured in points
+  expect(s.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><svg viewBox="0 0 1600 1000"')).toBe(true)
+  // the floor is drawn last, over the flashes, held to the bottom edge by points, not by the frame
+  const floorAt = s.indexOf('fill="url(#floor)"')
+  expect(floorAt).toBeGreaterThan(s.lastIndexOf('class="fo"'))
+  expect(floorAt).toBeGreaterThan(s.lastIndexOf('class="fl"'))
+  const all = FLOOR.solid + FLOOR.fade
+  expect(s).toContain(`<rect y="100%" width="100%" height="${all}" transform="translate(0 -${all})" fill="url(#floor)"/>`)
+  // clear at its top, the composer's own ground (surface-1) from the fade's end down
+  expect(s).toContain(`<stop offset="0.000" stop-color="${FLOOR.color}" stop-opacity="0.000"/>`)
+  expect(s).toContain(`<stop offset="${(FLOOR.fade / all).toFixed(3)}" stop-color="${FLOOR.color}" stop-opacity="1.000"/>`)
+  expect(FLOOR.color).toBe(INK.s1)
+  // the art's frame closes before the floor, and the floor closes the outer svg
+  expect(s.endsWith('fill="url(#floor)"/></svg>')).toBe(true)
+  expect(s.indexOf('</svg><defs><linearGradient id="floor"')).toBeGreaterThan(0)
+})
+
+test('the composer\'s ring is the rain\'s blue, not amber', () => {
+  const dark = (COLORS as unknown as { inputs: { dark: Record<string, string> } }).inputs.dark
+  expect(dark['role-accent-fill']).toBe('#576df2')
+  expect(INK.rain).toBe('#5f7cff')
 })
