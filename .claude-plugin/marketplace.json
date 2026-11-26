@@ -1,5 +1,16 @@
 {
   "name": "baeyyond-claude",
-  "owner": { "name": "metahumansworld" },
-  "plugins": [{ "name": "simulation", "source": "./" }]
+  "owner": {
+    "name": "metahumansworld"
+  },
+  "plugins": [
+    {
+      "name": "simulation",
+      "source": "./simulation"
+    },
+    {
+      "name": "desk",
+      "source": "./desk"
+    }
+  ]
 }

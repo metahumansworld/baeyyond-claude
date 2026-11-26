@@ -42,9 +42,17 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 
 ## Building the picture
 
-The traced picture in `hooks/trace/` and the mark in `hooks/logo-path.ts` are generated with potrace and are not meant to be edited by hand.
+The traced picture in `simulation/hooks/trace/` and the mark in `simulation/hooks/logo-path.ts` are generated with potrace and are not meant to be edited by hand.
 
 A backdrop must be one `Svg` filling the window: an earlier version stacked seven SVGs in positioned boxes, and the app drew nothing. Glass stays off: with any glass setting, even over a 1 KB scene, the desktop app drew no art at all.
+
+## Also here: desk
+
+A second mod in this marketplace, in [`desk/`](desk/README.md): a Waiting-on-you pane where every session puts what it needs from you (answered with buttons or a reply, straight into the session that asked), a console of what this session is doing, and `/phone <port>` to open a local site on your phone over your tailnet as a QR code.
+
+```bash
+claude plugin install desk@baeyyond-claude
+```
 
 ## Licence
 
