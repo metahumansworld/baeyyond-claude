@@ -11,6 +11,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { PhoneLink, Served } from '../types'
+import { keyOf, phonePortOf, pingVersion, provenPing } from './hub'
 import { qrRows } from './qr'
 
 export const TAILSCALE = '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
@@ -49,9 +50,29 @@ export function takenPorts(cfg: ServeConfig): Set<number> {
   return out
 }
 
-/** A handler at the root already sending to this local port, which the phone may simply use. */
+/** A handler at the root already sending to this local port, which the phone may simply use. Not for the hub: see `hubServeAt`. */
 export function existingFor(cfg: ServeConfig, localPort: number): Handler | undefined {
   return handlers(cfg).find(h => h.path === '/' && proxyPort(h.proxy) === localPort)
+}
+
+/**
+ * How the hub's address for this start stands in the serve config: `free`, already `ready` (one
+ * handler at the root sending to 127.0.0.1:<local port> itself, where the hub listens), or `held`
+ * by something else, which the desk leaves as it is.
+ */
+export function hubServeAt(cfg: ServeConfig, httpsPort: number, localPort: number): 'free' | 'ready' | 'held' {
+  const at = handlers(cfg).filter(h => h.port === httpsPort)
+  if (at.length === 0) return cfg.TCP?.[String(httpsPort)] === undefined ? 'free' : 'held'
+  const only = at.length === 1 ? at[0] : undefined
+  return only?.path === '/' && only.proxy.trim().replace(/\/$/, '') === `http://127.0.0.1:${localPort}` ? 'ready' : 'held'
+}
+
+/** The hub's link with the key its file holds now, at the same address, or undefined when it already has it or the key is none. */
+export function rekeyed(link: PhoneLink, key: string): PhoneLink | undefined {
+  const m = /^(https:\/\/[^/]+)\/([0-9a-f]{64})\/$/.exec(link.url)
+  if (m === null || !/^[0-9a-f]{64}$/.test(key) || m[2] === key) return undefined
+  const url = `${m[1]}/${key}/`
+  return { ...link, url, qr: qrRows(url) }
 }
 
 /** The tailnet port for a local one: the same number when no handler has it, else the next free. */
@@ -113,40 +134,78 @@ async function dnsName($: EngineInterface): Promise<string> {
   return name
 }
 
-async function check($: EngineInterface, url: string): Promise<string> {
-  const r = await $.process.run(['curl', '-sS', '--max-time', '20', '-w', '\n__status__%{http_code}', url], {
-    timeoutMs: 25_000,
-  })
+async function check($: EngineInterface, url: string, keyFile = ''): Promise<string> {
+  // the hub is asked to prove it holds its key, through the tailnet link; the key is never sent
+  if (keyFile !== '') {
+    const r = await $.process.run(provenPing(url, keyFile, 20), { timeoutMs: 25_000 })
+    return pingVersion(r.stdout) !== undefined ? checkLine(200, '') : 'the hub did not answer through this link from this Mac yet; give it a few seconds, or check that Tailscale is on.'
+  }
+  const flags = ['-sS', '--max-time', '20', '-w', '\n__status__%{http_code}']
+  const r = await $.process.run(['curl', ...flags, url], { timeoutMs: 25_000 })
   const at = r.stdout.lastIndexOf('\n__status__')
   const status = at === -1 ? 0 : Number(r.stdout.slice(at + 11)) || 0
   return checkLine(status, at === -1 ? r.stdout : r.stdout.slice(0, at))
 }
 
+/** What the screen says before a port is opened to the tailnet. */
+export function exposeLine(localPort: number, httpsPort: number, keyed: boolean): string {
+  return keyed
+    ? `Opening :${localPort} to every device on your tailnet at :${httpsPort}; the page needs the key in its link.`
+    : `Opening :${localPort} to every device on your tailnet at :${httpsPort}, with no login in front of it. /phone off ${httpsPort} closes it.`
+}
+
+/**
+ * Turns off the serves the desk made for the hub at addresses other than this start's, each only
+ * if it still sends where the desk left it: an earlier start's address leads nowhere then.
+ */
+export async function dropOldHubServes($: EngineInterface, localPort: number, httpsPort: number): Promise<string[]> {
+  const said: string[] = []
+  for (const k of (await $.store.keys()).filter(k => k.startsWith(SERVE))) {
+    const v = (await $.store.get(k)) as Served | undefined
+    if (v?.localPort === localPort && typeof v.httpsPort === 'number' && v.httpsPort !== httpsPort) said.push(await stopServe($, v.httpsPort))
+  }
+  return said
+}
+
 /**
  * Puts a local port on the tailnet (or finds it there already) and makes its link and code.
- * `note` reports each step as it goes.
+ * `note` reports each step as it goes. With `keyFile`, the link carries the key that file holds
+ * (the hub's), at the address the file names for this start of the hub; the serves the desk made
+ * for its earlier addresses are turned off, and the record keeps the link without the key.
  */
 export async function sendToPhone(
   $: EngineInterface,
   localPort: number,
   by: string,
   note: (line: string) => Promise<void>,
+  keyFile = '',
 ): Promise<PhoneLink> {
+  const keyText = keyFile === '' ? '' : await $.fs.read(keyFile).catch(() => '')
+  const key = keyOf(keyText)
+  if (keyFile !== '' && key === '') throw new Error('the hub has not made its key yet; give it a moment and try again.')
+  const hubAt = phonePortOf(keyText)
+  if (keyFile !== '' && hubAt === 0) throw new Error('the hub has no address for the phone yet; it takes one when it starts again.')
   await note(`Looking for a server on :${localPort}…`)
   const lsof = await $.process.run(['lsof', '-nP', `-iTCP:${localPort}`, '-sTCP:LISTEN'], { timeoutMs: 10_000 })
-  const target = targetFromLsof(lsof.stdout, localPort)
-  if (target === '') throw new Error(`nothing listens on :${localPort} on this Mac.`)
+  const found = targetFromLsof(lsof.stdout, localPort)
+  if (found === '') throw new Error(`nothing listens on :${localPort} on this Mac.`)
+  // the hub listens on 127.0.0.1 only; a serve to another name could reach a program beside it
+  const target = key === '' ? found : `http://127.0.0.1:${localPort}`
 
   const cfg = await config($)
   const dns = await dnsName($)
-  const had = existingFor(cfg, localPort)
+  const at = key === '' ? undefined : hubServeAt(cfg, hubAt, localPort)
+  if (at === 'held') throw new Error(`:${hubAt}, the hub's address on your tailnet for this start, is held by another serve; left as it is. The hub takes another when it starts again.`)
+  const had = key === '' ? existingFor(cfg, localPort) : at === 'ready' ? { port: hubAt } : undefined
   let httpsPort: number
   let isOurs = false
   if (had !== undefined) {
     httpsPort = had.port
+    // a serve the desk made for this address, from this session or another, stays the desk's to turn off
+    if (key !== '') isOurs = (await $.store.get(SERVE + httpsPort)) !== undefined
   } else {
-    httpsPort = pickPort(cfg, localPort)
-    await note(`Serving :${localPort} on your tailnet at :${httpsPort}…`)
+    httpsPort = key === '' ? pickPort(cfg, localPort) : hubAt
+    await note(exposeLine(localPort, httpsPort, key !== ''))
     const r = await ts($, ['serve', '--bg', `--https=${httpsPort}`, target])
     if (r.exitCode !== 0) throw new Error(`tailscale serve: ${(r.stderr || r.stdout).trim()}`)
     isOurs = true
@@ -154,9 +213,11 @@ export async function sendToPhone(
     const served: Served = { httpsPort, localPort, target, url, at: await $.clock.now(), by }
     await $.store.set(SERVE + httpsPort, served)
   }
+  if (key !== '') await dropOldHubServes($, localPort, httpsPort)
   const url = urlOf(dns, httpsPort)
   await note(`Checking ${url} from this Mac…`)
-  return { localPort, url, qr: qrRows(url), check: await check($, url), isOurs, httpsPort }
+  const link = key === '' ? url : `${url}/${key}/`
+  return { localPort, url: link, qr: qrRows(link), check: await check($, url, keyFile), isOurs, httpsPort }
 }
 
 /** Turns off a serve the desk made, if the config still sends that port where the desk left it. */

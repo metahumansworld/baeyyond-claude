@@ -51,7 +51,7 @@ A backdrop must be one `Svg` filling the window: an earlier version stacked seve
 A second mod in this marketplace, in [`desk/`](desk/README.md): a Waiting-on-you pane where every session puts what it needs from you (answered with buttons or a reply, straight into the session that asked), a hub page with every session's asks grouped by session that you answer from your phone over your tailnet (`/phone hub`), a console of what this session is doing, and `/phone <port>` to open a local site on your phone as a QR code.
 
 ```bash
-claude plugin install desk@baeyyond-claude
+claude plugin install desk --marketplace metahumansworld/baeyyond-claude
 ```
 
 ## Licence

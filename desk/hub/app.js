@@ -358,7 +358,7 @@
     clearTimeout(timer)
     try {
       const r = await fetch('api/state', { cache: 'no-store', credentials: 'same-origin' })
-      if (!r.ok) throw new Error(r.status === 403 ? 'this hub answers its owner only, through tailscale' : `the hub said ${r.status}`)
+      if (!r.ok) throw new Error(r.status === 403 ? 'this hub answers its owner only, through tailscale' : r.status === 404 ? 'this link no longer opens: the hub started again with a new key; scan its code again (/phone hub)' : `the hub said ${r.status}`)
       const v = await r.json()
       skew = v.now - Date.now()
       state = v

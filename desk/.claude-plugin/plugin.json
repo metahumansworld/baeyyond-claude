@@ -1,6 +1,6 @@
 {
   "name": "desk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Waiting on you: what every session needs from you, in one pane you answer from. A session console, and a local site sent to your phone over your tailnet.",
   "types": "./types/index.d.ts",
   "license": "MIT",

@@ -55,9 +55,9 @@ import {
   viewOf,
 } from './asks'
 import type { Desk } from './asks'
-import { ENSURE_MS, FEED_MS, HUB_PORT, ensureHub, feedOf, forMe, hubFolder, sitesOf } from './hub'
+import { ENSURE_MS, FEED_MS, HUB_PORT, ensureHub, feedOf, forMe, hubFolder, keyOf, phonePortOf, sitesOf } from './hub'
 import type { Site } from './hub'
-import { SERVE, portOf, sendToPhone, stopServe } from './phone'
+import { SERVE, dropOldHubServes, portOf, rekeyed, sendToPhone, stopServe } from './phone'
 import { qrSvg, qrText } from './qr'
 
 type Engine = EngineInterface
@@ -247,10 +247,46 @@ async function keepHub($: Engine): Promise<void> {
   try {
     const line = await ensureHub($, desk.hubDir)
     await update($, hubAtom, () => line)
+    // only a hub that has just proven itself on the port is followed to its new address
+    if (/^(running|started) on /.test(line)) await followHub($)
   } catch (err) {
     await update($, hubAtom, () => `could not check: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     desk.ensuring = false
+  }
+}
+
+/**
+ * Each start of the hub has its own key and its own address on the tailnet, which its key file
+ * names. The pane's code follows them: a new address gets a serve of its own before the code shows
+ * it, and the serves the desk made for earlier addresses are turned off, so nothing that answered
+ * an earlier address sees a request for this one. A key renewed while the hub runs keeps its address.
+ */
+async function followHub($: Engine): Promise<void> {
+  const file = `${desk.hubDir}/secret`
+  const text = await $.fs.read(file).catch(() => '')
+  const key = keyOf(text)
+  const at = phonePortOf(text)
+  if (key === '' || at === 0) return
+  const link = (await read($, phoneAtom)).find(l => l.localPort === HUB_PORT)
+  if (link === undefined) {
+    // no code here to follow; a serve the desk made for an earlier address leads nowhere, so it goes
+    if ((await servedByDesk($)).some(v => v.localPort === HUB_PORT && v.httpsPort !== at)) await dropOldHubServes($, HUB_PORT, at)
+    return
+  }
+  if (link.httpsPort === at) {
+    const next = rekeyed(link, key)
+    if (next === undefined) return
+    await update($, phoneAtom, list => list.map(l => (l.localPort === HUB_PORT ? next : l)))
+    await update($, phoneNoteAtom, () => 'The hub has a new key: scan the code again on your phone.')
+    return
+  }
+  try {
+    const moved = await sendToPhone($, HUB_PORT, desk.sid, async () => undefined, file)
+    await update($, phoneAtom, list => [...list.filter(l => l.localPort !== HUB_PORT), moved])
+    await update($, phoneNoteAtom, () => 'The hub started again, with a new key at a new address: scan the code again on your phone.')
+  } catch (err) {
+    await update($, phoneNoteAtom, () => `The hub started again; its new code is not ready: ${err instanceof Error ? err.message : String(err)} /phone hub tries again.`)
   }
 }
 
@@ -408,13 +444,23 @@ async function phone($: Engine, port: number): Promise<string> {
   desk.phoneBusy = true
   try {
     quiet($.ui.open({ id: SESSION, title: SESSION_TITLE }))
-    const link = await sendToPhone($, port, desk.sid, async line => {
-      await update($, phoneNoteAtom, () => line)
-    })
+    // the hub's link carries its key, so the pane and the code have it; the chat and the notice do not
+    const isHub = port === HUB_PORT
+    const link = await sendToPhone(
+      $,
+      port,
+      desk.sid,
+      async line => {
+        await update($, phoneNoteAtom, () => line)
+      },
+      isHub && desk.hubDir !== '' ? `${desk.hubDir}/secret` : '',
+    )
+    const shown = isHub ? link.url.replace(/\/[0-9a-f]{64}\/$/, '') : link.url
     await update($, phoneAtom, list => [...list.filter(l => l.localPort !== port), link])
-    await update($, phoneNoteAtom, () => '')
-    quiet($.ui.notify(link.url, { title: `:${port} is on your tailnet`, key: `desk:phone:${port}` }))
-    return `${link.url} (${link.isOurs ? 'new serve' : 'already served'}): ${link.check}`
+    await update($, phoneNoteAtom, () => (isHub ? '' : `:${port} is open to every device on your tailnet, with no login. /phone off ${link.httpsPort} closes it.`))
+    quiet($.ui.notify(shown, { title: `:${port} is on your tailnet`, key: `desk:phone:${port}` }))
+    const keyLine = isHub ? ' The link with its key is in the code in the session pane.' : ' Every device on your tailnet can open it.'
+    return `${shown} (${link.isOurs ? 'new serve' : 'already served'}): ${link.check}${keyLine}`
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await update($, phoneNoteAtom, () => `Send to phone: ${msg}`)
@@ -796,31 +842,35 @@ export const register: Register = on => {
           </Text>
         </Box>
 
-        {links.map(l => (
-          <Box key={`link${l.httpsPort}`} flexDirection="column" gap={1}>
-            {head(`Phone · :${l.localPort}`)}
-            <Link href={l.url} label={l.url} />
-            {'Svg' in els && e.surface !== 'terminal' ? (
-              <els.Svg source={qrSvg(l.qr)} alt={`QR code for ${l.url}`} width={176} height={176} />
-            ) : (
-              <Box flexDirection="column">
-                {qrText(l.qr).map((line, i) => (
-                  <Text key={`qr${l.httpsPort}:${i}`} color="#ffffff" backgroundColor="#000000">
-                    {line}
-                  </Text>
-                ))}
-              </Box>
-            )}
-            <Text dimColor wrap="wrap">
-              Checked from this Mac: {l.check} Reachable inside your tailnet only.
-            </Text>
-            {l.isOurs ? (
-              <Button key={`off:${l.httpsPort}`} label="Stop serving" onPress={() => quiet(stopPhone($, l))} />
-            ) : (
-              <Text dimColor>This link was already served; the desk leaves it as it is.</Text>
-            )}
-          </Box>
-        ))}
+        {links.map(l => {
+          // the hub's link opens with its key, but the label and the code's text leave the key out
+          const label = l.url.replace(/\/[0-9a-f]{64}\/$/, '/<key>/')
+          return (
+            <Box key={`link${l.httpsPort}`} flexDirection="column" gap={1}>
+              {head(`Phone · :${l.localPort}`)}
+              <Link href={l.url} label={label} />
+              {'Svg' in els && e.surface !== 'terminal' ? (
+                <els.Svg source={qrSvg(l.qr)} alt={`QR code for ${label}`} width={176} height={176} />
+              ) : (
+                <Box flexDirection="column">
+                  {qrText(l.qr).map((line, i) => (
+                    <Text key={`qr${l.httpsPort}:${i}`} color="#ffffff" backgroundColor="#000000">
+                      {line}
+                    </Text>
+                  ))}
+                </Box>
+              )}
+              <Text dimColor wrap="wrap">
+                Checked from this Mac: {l.check} Reachable inside your tailnet only.
+              </Text>
+              {l.isOurs ? (
+                <Button key={`off:${l.httpsPort}`} label="Stop serving" onPress={() => quiet(stopPhone($, l))} />
+              ) : (
+                <Text dimColor>This link was already served; the desk leaves it as it is.</Text>
+              )}
+            </Box>
+          )
+        })}
       </Box>
     )
   })

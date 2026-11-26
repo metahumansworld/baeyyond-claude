@@ -1,6 +1,15 @@
 // The desk's hub: every session's asks on one page, for the person's phone.
 //
-// It listens on 127.0.0.1 only. The phone reaches it through `tailscale serve` (the desk's
+// It listens on 127.0.0.1 only, and answers only a path that starts with its key: a random
+// secret it makes new at every start, once it holds the port, and keeps in <dir>/secret (0600, the
+// folder 0700), renewed every 30 days while it runs (key.mjs). So a key never outlives its hub: one
+// caught by a program that took the port after the hub stopped opens nothing. Each start also has
+// its own address for the phone, <this Mac>.ts.net:<a port of its own>, kept with the key, and the
+// hub answers under its key only there: a page planted at an earlier start's address never sees a
+// request for this one. The key rides in the QR link's path; any other
+// request gets 404 before anything is read, but one: /api/proof?n=<nonce>, where the hub proves
+// to a session that it holds the key without the session ever sending it. Behind the key, as
+// a second gate: the phone reaches it through `tailscale serve` (the desk's
 // `/phone 4791`), which tells it who is asking in the Tailscale-User-Login header and strips any
 // copy a client sends. So the hub answers only requests that carry its owner's login: the user
 // this Mac is signed in to Tailscale as. A tagged device, another person's, or a page on this Mac
@@ -11,23 +20,23 @@
 // asked while it reads the hub, else to another that does, which leaves it in the desk's store
 // for the asker. The hub writes inbox.json and hub.json alone, and reads the feeds.
 //
-//   node server.mjs [--port 4791] [--dir ~/.claude/desk-hub]
+//   node server.mjs [--port 4791] [--dir ~/.claude/desk-hub] [--key-max-age-ms <ms>] [--tailscale <cli>]
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { KEY_MAX_AGE_MS, digest, isNonce, keyLine, newKey, phonePort, proofOf, unlock } from './key.mjs'
 import { canAnswer, cleanFeed, routeInbox, stateOf } from './state.mjs'
 
 /** Kept equal to HUB_VERSION in hooks/hub.ts: a session replaces a hub older than itself. */
-export const VERSION = '0.2.0'
+export const VERSION = '0.2.1'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const TAILSCALE = '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
 const STEP_MS = 2000
 /** With no session feeding it this long, the hub stops; the next session starts it again. */
 const IDLE_STOP_MS = 12 * 3600_000
@@ -41,6 +50,10 @@ const PORT = Number(arg('port', '4791'))
 const DIR = arg('dir', join(homedir(), '.claude', 'desk-hub'))
 const FEEDS = join(DIR, 'feeds')
 const INBOX = join(DIR, 'inbox.json')
+const SECRET = join(DIR, 'secret')
+const KEY_AGE_MS = Number(arg('key-max-age-ms', String(KEY_MAX_AGE_MS))) || KEY_MAX_AGE_MS
+/** The Tailscale command line, asked only for this Mac's login and name; tests give a stand-in. */
+const TAILSCALE = arg('tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale')
 const HOME = homedir()
 const startedAt = Date.now()
 
@@ -59,6 +72,7 @@ async function loadFeeds() {
     const path = join(FEEDS, n)
     const st = await stat(path).catch(() => undefined)
     if (st === undefined) continue
+    if ((st.mode & 0o077) !== 0) await chmod(path, 0o600).catch(() => undefined)
     if (now - st.mtimeMs > 7 * 24 * 3600_000) {
       await unlink(path).catch(() => undefined)
       feedCache.delete(n)
@@ -94,7 +108,7 @@ function saveInbox() {
   const text = JSON.stringify({ v: 1, at: Date.now(), entries: inbox })
   saving = saving.then(async () => {
     const tmp = `${INBOX}.${process.pid}.tmp`
-    await writeFile(tmp, text)
+    await writeFile(tmp, text, { mode: 0o600 })
     await rename(tmp, INBOX)
   })
   return saving
@@ -112,7 +126,21 @@ async function step() {
 
 // ── who may ask ─────────────────────────────────────────────────────────────────────────────
 
-let owner = { login: '', at: 0 }
+/** The key, loaded once the hub holds the port; until then every request is 404. */
+let key = ''
+/** Its digest: every request's first path segment must hash to it. Empty until the key is loaded. */
+let keyHash = Buffer.alloc(0)
+let keyMadeAt = 0
+/** The tailnet port of this start's address, taken with its first key; 0 until then. */
+let phoneAt = 0
+
+function useKey(k) {
+  key = k.key
+  keyHash = digest(k.key)
+  keyMadeAt = k.madeAt
+}
+
+let owner = { login: '', dns: '', at: 0 }
 
 function tailscaleStatus() {
   return new Promise((resolve, reject) => {
@@ -122,25 +150,33 @@ function tailscaleStatus() {
   })
 }
 
-/** The login this Mac is signed in to Tailscale as, lower case; renewed every five minutes. */
+/** The login this Mac is signed in to Tailscale as, lower case, and its name there; renewed every five minutes. */
 async function ownerLogin() {
   if (owner.login !== '' && Date.now() - owner.at < 300_000) return owner.login
   try {
     const s = JSON.parse(await tailscaleStatus())
     const login = String(s.User?.[String(s.Self?.UserID)]?.LoginName ?? '').toLowerCase()
-    if (login !== '') owner = { login, at: Date.now() }
+    const dns = String(s.Self?.DNSName ?? '').replace(/\.$/, '').toLowerCase()
+    if (login !== '') owner = { login, dns, at: Date.now() }
   } catch (err) {
     log(`tailscale status failed: ${err instanceof Error ? err.message : String(err)}`)
   }
   return owner.login
 }
 
-/** The names the hub answers to: this Mac, and its name on the tailnet. */
-function hostOk(host) {
+/** This Mac's own names for the hub, which only a program on it uses. */
+function isLoopback(host) {
   const h = String(host ?? '').toLowerCase()
-  return (
-    h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `[::1]:${PORT}` || /^[a-z0-9-]+\.[a-z0-9-]+\.ts\.net(:\d+)?$/.test(h)
-  )
+  return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `[::1]:${PORT}`
+}
+
+/**
+ * Whether a request came to this start's own address, <this Mac>.ts.net:<its port>, as serve
+ * passes the phone's Host on. Not an earlier start's address, nor any other name: the key opens the
+ * page, the state and the answers only here. False while Tailscale has not named the Mac.
+ */
+function isOwnAddress(host) {
+  return owner.dns !== '' && phoneAt !== 0 && String(host ?? '').toLowerCase() === `${owner.dns}:${phoneAt}`
 }
 
 // ── answering ───────────────────────────────────────────────────────────────────────────────
@@ -220,12 +256,27 @@ async function answer(req, res) {
 }
 
 async function handle(req, res) {
-  const path = new URL(req.url ?? '/', 'http://hub').pathname
-  // the sessions' check that the hub is up, and which; it says nothing else
+  let url
+  try {
+    url = new URL(req.url ?? '/', 'http://hub')
+  } catch {
+    return text(res, 404, 'Not here.')
+  }
+  const full = url.pathname
+  // the sessions' check that this is the hub, and which: it proves the key without anyone sending it
+  if (full === '/api/proof' && req.method === 'GET' && key !== '' && (isLoopback(req.headers.host) || isOwnAddress(req.headers.host))) {
+    const nonce = url.searchParams.get('n')
+    if (isNonce(nonce)) return json(res, 200, { name: 'desk-hub', version: VERSION, proof: proofOf(key, nonce) })
+  }
+  const path = unlock(keyHash, full)
+  if (path === undefined) return text(res, 404, 'Not here.')
+  // the key alone: to its page, so the page's own links resolve under the key
+  if (path === '') return send(res, 302, 'text/plain; charset=utf-8', '', { Location: `${full.slice(full.lastIndexOf('/') + 1)}/` })
+  // the check of sessions older than the proof, under the key; it says nothing else
   if (path === '/api/ping') return json(res, 200, { name: 'desk-hub', version: VERSION })
-  if (!hostOk(req.headers.host)) return text(res, 421, 'Not this hub.')
   const login = await ownerLogin()
   if (login === '') return text(res, 503, 'The hub cannot reach Tailscale to learn who owns this Mac.')
+  if (!isOwnAddress(req.headers.host)) return text(res, 421, 'Not this hub.')
   const who = String(req.headers['tailscale-user-login'] ?? '').toLowerCase()
   if (who !== login) return text(res, 403, 'This hub answers only its owner, through Tailscale.')
 
@@ -253,7 +304,20 @@ async function handle(req, res) {
 
 // ── life ────────────────────────────────────────────────────────────────────────────────────
 
-await mkdir(FEEDS, { recursive: true })
+/** The hub folder 0700 and its files 0600, those already there too; links are left alone. Run at start and every step. */
+async function tighten(dir) {
+  const self = await lstat(dir).catch(() => undefined)
+  if (self?.isDirectory() && (self.mode & 0o077) !== 0) await chmod(dir, 0o700)
+  for (const n of await readdir(dir).catch(() => [])) {
+    const p = join(dir, n)
+    const st = await lstat(p).catch(() => undefined)
+    if (st?.isDirectory()) await tighten(p)
+    else if (st?.isFile() && (st.mode & 0o077) !== 0) await chmod(p, 0o600).catch(() => undefined)
+  }
+}
+
+await mkdir(FEEDS, { recursive: true, mode: 0o700 })
+await tighten(DIR)
 await loadInbox()
 
 /** The page's files, read once at start: the hub keeps serving if the mod's folder moves or updates. */
@@ -281,23 +345,85 @@ server.on('error', err => {
   process.exit(1)
 })
 
+let timer
+
+/** The tailnet ports earlier starts took, as the last hub.json lists them; none when it cannot be read. */
+async function usedPorts() {
+  try {
+    const v = JSON.parse(await readFile(join(DIR, 'hub.json'), 'utf8'))
+    return Array.isArray(v.phonePorts) ? v.phonePorts.filter(p => Number.isInteger(p)).slice(-1000) : []
+  } catch {
+    return []
+  }
+}
+
+// Only the hub that holds the port touches the key and hub.json: hubs started together, all but
+// one of which lose the port, never write the key at once. Its key is new: whatever the file held
+// was the key of a hub that has stopped, and may have reached whoever held the port since. So is
+// its address: a port no earlier start took (hub.json keeps the last thousand), so whatever answered
+// an earlier address, a page or a worker planted there, never sees a request for this one.
 server.listen(PORT, '127.0.0.1', async () => {
-  await writeFile(join(DIR, 'hub.json'), JSON.stringify({ pid: process.pid, port: PORT, version: VERSION, startedAt, root: HERE }))
-  log(`desk hub ${VERSION} on 127.0.0.1:${PORT}, pid ${process.pid}`)
+  try {
+    const used = await usedPorts()
+    phoneAt = phonePort(used, PORT)
+    useKey(await newKey(SECRET, phoneAt))
+    const tmp = join(DIR, `hub.json.${process.pid}.tmp`)
+    const phonePorts = [...used, phoneAt].slice(-1000)
+    await writeFile(tmp, JSON.stringify({ pid: process.pid, port: PORT, version: VERSION, proves: true, startedAt, root: HERE, phonePorts }), { mode: 0o600 })
+    await rename(tmp, join(DIR, 'hub.json'))
+  } catch (err) {
+    log(`cannot load the key: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+  log(`desk hub ${VERSION} on 127.0.0.1:${PORT}, pid ${process.pid}; its tailnet port for the phone this start: ${phoneAt}`)
   void ownerLogin()
+  timer = setInterval(tick, STEP_MS)
 })
 
-const timer = setInterval(async () => {
+/** Set once the hub stops: it writes no key after that, as the next hub may already hold the port. */
+let stopping = false
+
+/** The key the file holds now, 'gone' when there is no file, or undefined when it could not be read. */
+async function keyOnDisk() {
   try {
+    return keyLine(await readFile(SECRET, 'utf8'))
+  } catch (err) {
+    if (err?.code === 'ENOENT') return 'gone'
+    log(`cannot read the key file this time: ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
+  }
+}
+
+/** When the hub last asked Tailscale for its name while it had none. */
+let askedAt = 0
+
+async function tick() {
+  if (stopping) return
+  try {
+    // the address needs this Mac's name: asked again every half minute while Tailscale has given none
+    if (owner.login === '' && Date.now() - askedAt > 30_000) {
+      askedAt = Date.now()
+      void ownerLogin()
+    }
+    await tighten(DIR)
+    // a key past its age, or a file removed or changed, gets a fresh key, written whole; a file
+    // that could not be read this once is left be, so one failed read does not break the phone's link
+    const onDisk = await keyOnDisk()
+    if (Date.now() - keyMadeAt > KEY_AGE_MS || (onDisk !== undefined && onDisk !== key)) {
+      if (stopping) return
+      useKey(await newKey(SECRET, phoneAt))
+      log('renewed the key; the old link no longer opens')
+    }
     const feeds = await step()
     const newest = feeds.reduce((m, f) => Math.max(m, f.at), 0)
     if (Date.now() - Math.max(newest, startedAt) > IDLE_STOP_MS) stop('no session has fed the hub for 12 hours')
   } catch (err) {
     log(`step failed: ${err instanceof Error ? err.message : String(err)}`)
   }
-}, STEP_MS)
+}
 
 function stop(why) {
+  stopping = true
   log(`stopping: ${why}`)
   clearInterval(timer)
   server.close()
