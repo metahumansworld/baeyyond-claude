@@ -42,4 +42,4 @@ A backdrop must be one `Svg` filling the window: an earlier version stacked seve
 
 ## Licence
 
-The code is MIT (see `LICENSE`). The baeYYond name and mark are not covered by it: all rights to them are reserved.
+The code is MIT (see `LICENSE`). The baeYYond name and mark are not covered by it: all rights to them are reserved (see `TRADEMARK.md`).
