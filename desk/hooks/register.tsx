@@ -13,6 +13,10 @@
 //
 // Send to phone (/phone <port>, or the button by a server). The port goes on the tailnet with
 // `tailscale serve`, and the pane shows the link as a QR code (phone.ts, qr.ts).
+//
+// The hub (hub.ts, hub/). One page with every session's asks, grouped by session, answered from
+// the phone. Each session feeds it and takes the answers it hands back; `/phone hub` puts it on
+// the tailnet.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -50,6 +54,9 @@ import {
   staleKeys,
   viewOf,
 } from './asks'
+import type { Desk } from './asks'
+import { ENSURE_MS, FEED_MS, HUB_PORT, ensureHub, feedOf, forMe, hubFolder, sitesOf } from './hub'
+import type { Site } from './hub'
 import { SERVE, portOf, sendToPhone, stopServe } from './phone'
 import { qrSvg, qrText } from './qr'
 
@@ -66,6 +73,7 @@ export const activityAtom = atom({ plugin: 'desk', key: 'activity' } as const, E
 export const beatAtom = atom({ plugin: 'desk', key: 'beat' } as const, 0)
 export const phoneAtom = atom({ plugin: 'desk', key: 'phone' } as const, [] as PhoneLink[], { shape: 'phone-1' })
 export const phoneNoteAtom = atom({ plugin: 'desk', key: 'phoneNote' } as const, '')
+export const hubAtom = atom({ plugin: 'desk', key: 'hub' } as const, '')
 
 /** The standing instruction, the same in every session (a varying one would break the cache). */
 export const GUIDE = [
@@ -133,13 +141,26 @@ const desk = {
   last: '',
   minute: -1,
   markedAt: 0,
-  busy: false,
+  inFlight: undefined as undefined | Promise<void>,
+  again: false,
   running: 0,
   beat: 0,
   phoneBusy: false,
   timer: undefined as undefined | { cancel: () => void },
   notified: new Set<string>(),
   drafts: new Map<string, string>(),
+  // the hub
+  hubDir: '',
+  hubTimer: undefined as undefined | { cancel: () => void },
+  ensuring: false,
+  inTurn: false,
+  idleSince: 0,
+  inboxAt: 0,
+  taken: [] as string[],
+  feedSig: '',
+  feedAt: 0,
+  sites: [] as Site[],
+  sitesAt: 0,
 }
 
 const quiet = (p: Promise<unknown>) => void p.catch(() => undefined)
@@ -168,49 +189,146 @@ async function deliver($: Engine, id: string, text: string): Promise<void> {
   })
 }
 
-/** Read the store, take replies left for this session, tidy, and redraw what changed. */
-export async function refresh($: Engine): Promise<void> {
-  if (desk.busy || desk.sid === '') return
-  desk.busy = true
-  try {
-    const now = await $.clock.now()
-    if (now - desk.markedAt >= MARK_MS) {
-      desk.markedAt = now
-      await $.store.set(LIVE + desk.sid, now)
-    }
-    const all = await loadAll($)
+// ── The hub ─────────────────────────────────────────────────────────────────────────────────
 
-    for (const [id, r] of [...all.replies]) {
-      const ask = all.asks.find(a => a.id === id)
-      if (ask === undefined || ask.sessionId !== desk.sid) continue
-      all.replies.delete(id)
-      await $.store.delete(REPLY + id)
-      if (ask.state !== 'open') continue
-      await deliver($, id, r.text)
-      ask.state = 'replied'
+/**
+ * The hub's answers handed to this session: to its own asks, sent into this chat as the pane
+ * sends them; to another session's, left in the store for it. Done closes the ask either way.
+ */
+async function takeFromHub($: Engine, all: Desk, now: number): Promise<void> {
+  const path = `${desk.hubDir}/inbox.json`
+  const st = (await $.fs.exists(path)) ? await $.fs.stat(path) : undefined
+  if (st === undefined || st.mtimeMs === desk.inboxAt) return
+  const mine = forMe(await $.fs.read(path).catch(() => ''), desk.sid, new Set(desk.taken))
+  // half written: read again on the next poll
+  if (mine === undefined) return
+  desk.inboxAt = st.mtimeMs
+  for (const e of mine) {
+    const ask = all.asks.find(a => a.id === e.askId)
+    if (ask !== undefined && ask.state === 'open') {
+      if (e.done) {
+        await closeAsk($, e.askId, 'done', '')
+        await $.store.delete(REPLY + e.askId)
+        ask.state = 'done'
+        ask.closedAt = now
+      } else if (ask.sessionId === desk.sid) {
+        await deliver($, e.askId, e.words)
+        ask.state = 'replied'
+        ask.reply = e.words
+        ask.closedAt = now
+      } else {
+        await $.store.set(REPLY + e.askId, { text: e.words, at: now, from: 'hub' })
+        all.replies.set(e.askId, { text: e.words, at: now, from: 'hub' })
+      }
     }
-    for (const a of all.asks) {
-      if (a.state !== 'open' && desk.notified.delete(a.id)) void $.ui.cancelNotify('desk:' + a.id)
-    }
-    for (const key of staleKeys(all, now)) await $.store.delete(key)
-
-    const pending = new Map([...all.replies].map(([id, r]) => [id, r.text] as const))
-    const view = viewOf(all.asks, desk.sid, all.live, pending, now)
-    const sig = JSON.stringify(view)
-    if (sig !== desk.last) {
-      desk.last = sig
-      await update($, asksAtom, () => view)
-    }
-    const minute = Math.floor(now / 60_000)
-    if (minute !== desk.minute) {
-      desk.minute = minute
-      await update($, minuteAtom, () => minute)
-    }
-    // while a call runs, its time counts up in the session pane
-    if (desk.running > 0) await update($, beatAtom, () => ++desk.beat)
-  } finally {
-    desk.busy = false
+    desk.taken = [...desk.taken, e.rid].slice(-200)
   }
+}
+
+/** This session's feed to the hub, written when it changes and every ten seconds. */
+async function feedHub($: Engine, all: Desk, now: number): Promise<void> {
+  if (now - desk.sitesAt >= FEED_MS) {
+    desk.sitesAt = now
+    desk.sites = sitesOf(await servedByDesk($), desk.sid)
+  }
+  const me = { sid: desk.sid, cwd: desk.cwd, running: desk.inTurn, idleSince: desk.idleSince, taken: desk.taken }
+  const feed = feedOf(all, me, desk.sites, now)
+  const sig = JSON.stringify(feed)
+  if (sig === desk.feedSig && now - desk.feedAt < FEED_MS) return
+  await $.fs.write(`${desk.hubDir}/feeds/${desk.sid.replace(/[^A-Za-z0-9_-]/g, '_')}.json`, JSON.stringify({ ...feed, at: now }))
+  desk.feedSig = sig
+  desk.feedAt = now
+}
+
+/** Checks that the hub runs, starting it when it does not; one check at a time. */
+async function keepHub($: Engine): Promise<void> {
+  if (desk.ensuring || desk.hubDir === '') return
+  desk.ensuring = true
+  try {
+    const line = await ensureHub($, desk.hubDir)
+    await update($, hubAtom, () => line)
+  } catch (err) {
+    await update($, hubAtom, () => `could not check: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    desk.ensuring = false
+  }
+}
+
+/**
+ * Read the store, take replies left for this session, tidy, and redraw what changed. A call while
+ * a pass runs waits for it and then for one more, so its caller sees the store as it left it.
+ */
+export async function refresh($: Engine): Promise<void> {
+  if (desk.sid === '') return
+  if (desk.inFlight !== undefined) {
+    desk.again = true
+    return desk.inFlight
+  }
+  desk.inFlight = passes($)
+  try {
+    await desk.inFlight
+  } finally {
+    desk.inFlight = undefined
+  }
+}
+
+async function passes($: Engine): Promise<void> {
+  do {
+    desk.again = false
+    await pass($)
+  } while (desk.again)
+}
+
+async function pass($: Engine): Promise<void> {
+  const now = await $.clock.now()
+  if (now - desk.markedAt >= MARK_MS) {
+    desk.markedAt = now
+    await $.store.set(LIVE + desk.sid, now)
+  }
+  const all = await loadAll($)
+  if (desk.hubDir !== '') {
+    try {
+      await takeFromHub($, all, now)
+    } catch {
+      // the inbox is read again on the next poll
+    }
+  }
+
+  for (const [id, r] of [...all.replies]) {
+    const ask = all.asks.find(a => a.id === id)
+    if (ask === undefined || ask.sessionId !== desk.sid) continue
+    all.replies.delete(id)
+    await $.store.delete(REPLY + id)
+    if (ask.state !== 'open') continue
+    await deliver($, id, r.text)
+    ask.state = 'replied'
+  }
+  for (const a of all.asks) {
+    if (a.state !== 'open' && desk.notified.delete(a.id)) void $.ui.cancelNotify('desk:' + a.id)
+  }
+  for (const key of staleKeys(all, now)) await $.store.delete(key)
+  if (desk.hubDir !== '') {
+    try {
+      await feedHub($, all, now)
+    } catch {
+      // written again on the next poll
+    }
+  }
+
+  const pending = new Map([...all.replies].map(([id, r]) => [id, r.text] as const))
+  const view = viewOf(all.asks, desk.sid, all.live, pending, now)
+  const sig = JSON.stringify(view)
+  if (sig !== desk.last) {
+    desk.last = sig
+    await update($, asksAtom, () => view)
+  }
+  const minute = Math.floor(now / 60_000)
+  if (minute !== desk.minute) {
+    desk.minute = minute
+    await update($, minuteAtom, () => minute)
+  }
+  // while a call runs, its time counts up in the session pane
+  if (desk.running > 0) await update($, beatAtom, () => ++desk.beat)
 }
 
 /** The pane's answer to one ask: here, sent at once; another session's, left for it to take. */
@@ -379,11 +497,31 @@ export const register: Register = on => {
       $.command.register({
         name: 'phone',
         description: 'Send a local server to your phone over your tailnet, as a QR code',
-        argumentHint: '<port> | off <port>',
+        argumentHint: '<port> | hub | off <port>',
       }),
     ])
     desk.timer?.cancel()
     desk.timer = $.clock.every(POLL_MS, () => quiet(refresh($)))
+    // the hub: its folder, the answers this session took before a reload, and the server itself
+    try {
+      desk.hubDir = await hubFolder($)
+      const own = `${desk.hubDir}/feeds/${desk.sid.replace(/[^A-Za-z0-9_-]/g, '_')}.json`
+      const had = (desk.hubDir !== '' && (await $.fs.exists(own)) ? JSON.parse(await $.fs.read(own)) : {}) as { taken?: unknown }
+      if (Array.isArray(had.taken)) desk.taken = had.taken.filter((r): r is string => typeof r === 'string').slice(-200)
+    } catch {
+      // no feed yet: nothing taken
+    }
+    // after a reload mid-turn, the turn record the session keeps says whether a turn still runs
+    try {
+      const last = (await read($, activityAtom)).turns.at(-1)
+      desk.inTurn = last !== undefined && last.ms === 0
+      desk.idleSince = last !== undefined && last.ms > 0 ? last.startedAt + last.ms : 0
+    } catch {
+      // unknown: the next turn says
+    }
+    desk.hubTimer?.cancel()
+    desk.hubTimer = $.clock.every(ENSURE_MS, () => quiet(keepHub($)))
+    quiet(keepHub($))
     try {
       await refresh($)
       if ((await read($, asksAtom)).length > 0) quiet($.ui.open({ id: WAITING, title: WAITING_TITLE }))
@@ -412,8 +550,9 @@ export const register: Register = on => {
       if (mine.length === 0) return { text: 'The desk has nothing on your tailnet. /phone <port> sends a local server.' }
       return { text: mine.map(v => `:${v.localPort} → ${v.url} (/phone off ${v.httpsPort})`).join('\n') }
     }
+    if (words[0] === 'hub') return { text: await phone($, HUB_PORT) }
     if (words[0] === 'off') {
-      const port = portOf(words[1] ?? '')
+      const port = words[1] === 'hub' ? HUB_PORT : portOf(words[1] ?? '')
       if (port === 0) return { text: 'Give the port: /phone off 5173.' }
       const link = (await read($, phoneAtom)).find(l => l.httpsPort === port || l.localPort === port)
       if (link !== undefined) return { text: await stopPhone($, link) }
@@ -450,6 +589,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const now = await $.clock.now()
+      desk.inTurn = true
       await update($, activityAtom, a => turnStarted(a, now, e.text))
     }
     return next(e)
@@ -459,6 +599,8 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       const now = await $.clock.now()
       desk.running = 0
+      desk.inTurn = false
+      desk.idleSince = now
       await update($, activityAtom, a => turnEnded(a, now, e.durationMs))
     }
     return next(e)
@@ -541,6 +683,7 @@ export const register: Register = on => {
     await read($, minuteAtom)
     const links = await read($, phoneAtom)
     const note = await read($, phoneNoteAtom)
+    const hub = await read($, hubAtom)
     const now = await $.clock.now()
     const usage = await $.session.usage().catch(() => undefined)
     const turn = a.turns[a.turns.length - 1]
@@ -643,6 +786,14 @@ export const register: Register = on => {
               {note}
             </Text>
           )}
+        </Box>
+
+        <Box flexDirection="column">
+          {head('Hub')}
+          <Text dimColor wrap="wrap">
+            {hub === '' ? 'Checking…' : hub}
+            {links.some(l => l.localPort === HUB_PORT) ? '' : ` · /phone hub puts it on your tailnet`}
+          </Text>
         </Box>
 
         {links.map(l => (

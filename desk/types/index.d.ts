@@ -87,6 +87,8 @@ declare module 'claude-code' {
       phone: Shaped<PhoneLink[]>
       /** The phone step in progress or its last error, in a line; empty for none. */
       phoneNote: string
+      /** How the hub stands, in a few words; empty before the first check. */
+      hub: string
     }
   }
 }
