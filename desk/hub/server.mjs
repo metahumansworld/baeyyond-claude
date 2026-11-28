@@ -34,7 +34,7 @@ import { KEY_MAX_AGE_MS, digest, isNonce, keyLine, newKey, phonePort, proofOf, u
 import { canAnswer, cleanFeed, routeInbox, stateOf } from './state.mjs'
 
 /** Kept equal to HUB_VERSION in hooks/hub.ts: a session replaces a hub older than itself. */
-export const VERSION = '0.2.1'
+export const VERSION = '0.2.2'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const STEP_MS = 2000

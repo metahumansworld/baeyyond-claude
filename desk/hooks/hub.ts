@@ -1,8 +1,8 @@
 // The hub: every session's asks on one page, for the person's phone (hub/server.mjs).
 //
 // Each session feeds it: it writes feeds/<session>.json in the hub folder, ~/.claude/desk-hub,
-// with what it reads from the desk's store, whether a turn runs, its served sites, and the
-// hub's answers it has taken. The hub hands each answer from the page to one session in
+// with what it reads from the desk's store and that store's name, whether a turn runs, its served
+// sites, and the hub's answers it has taken. The hub hands each answer from the page to one session in
 // inbox.json (`by`): the asker while it reads the hub, else another, which leaves it in the store
 // for the asker as the pane does. Any session that finds the hub down, or older than itself,
 // starts it; it runs on its own on 127.0.0.1 and stops after half a day with no feed.
@@ -20,7 +20,7 @@ import type { Desk } from './asks'
 
 export const HUB_PORT = 4791
 /** Kept equal to VERSION in hub/server.mjs: a session replaces a hub older than itself. */
-export const HUB_VERSION = '0.2.1'
+export const HUB_VERSION = '0.2.2'
 /** A feed is written when it changes, and at least this often, so the hub knows the session is open. */
 export const FEED_MS = 10_000
 /** How often a session checks that the hub runs. */
@@ -34,6 +34,8 @@ export type Feed = {
   v: 1
   sid: string
   version: string
+  /** The name of the store this session reads (asks.ts, STORE); empty when it has none. */
+  store: string
   cwd: string
   /** A turn of this session runs now. */
   running: boolean
@@ -71,6 +73,7 @@ export function feedOf(all: Desk, me: Me, sites: readonly Site[], now: number): 
     v: 1,
     sid: me.sid,
     version: HUB_VERSION,
+    store: all.store,
     cwd: me.cwd,
     running: me.running,
     idleSince: me.idleSince,

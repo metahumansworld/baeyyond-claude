@@ -111,6 +111,7 @@ test('tidying drops day-old closed asks, gone sessions\' marks and orphan replie
       asks: [{ ...a, id: 'old', state: 'done', closedAt: 1 }, { ...a, id: 'open', askedAt: 1 }, { ...a, id: 'fresh', state: 'done', closedAt: now - 10 }],
       replies: new Map([['gone', { text: 't', at: 1, from: 's' }], ['open', { text: 't', at: 1, from: 's' }]]),
       live: new Map([['s-old', 1], ['s-new', now]]),
+      store: 'st-1',
     },
     now,
   )

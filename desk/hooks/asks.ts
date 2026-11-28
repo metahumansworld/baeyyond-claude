@@ -4,7 +4,8 @@
 // session's. Only the asking session can put a reply into its own chat (`$.prompt.submit`
 // reaches this session alone), so a reply typed in another session's pane is left under
 // `reply:<id>` and the asker's poll takes it. Each session marks `live:<sessionId>` as it
-// polls, so a pane can say when the asker is closed and a reply will wait for it.
+// polls, so a pane can say when the asker is closed and a reply will wait for it. The store names
+// itself under `store`, once, so the hub can tell the feeds of two stores apart.
 //
 // Everything here but `loadAll` is pure, so it is tested alone.
 
@@ -15,6 +16,8 @@ import type { Ask, AskKind, AskView } from '../types'
 export const ASK = 'ask:'
 export const REPLY = 'reply:'
 export const LIVE = 'live:'
+/** The store's own name, under this one key: a random id the first pass to find none makes, so the hub can tell two stores apart. */
+export const STORE = 'store'
 /** How often each session reads the store. */
 export const POLL_MS = 2000
 /** How often a session renews its mark. */
@@ -135,12 +138,12 @@ export type Reply = { text: string; at: number; from: string }
 export const isReply = (v: unknown): v is Reply =>
   typeof v === 'object' && v !== null && typeof (v as Reply).text === 'string'
 
-/** Everything the desk keeps, read in one pass. */
-export type Desk = { asks: Ask[]; replies: Map<string, Reply>; live: Map<string, number> }
+/** Everything the desk keeps, read in one pass; `store` is the store's own name, empty while it has none. */
+export type Desk = { asks: Ask[]; replies: Map<string, Reply>; live: Map<string, number>; store: string }
 
 export async function loadAll($: EngineInterface): Promise<Desk> {
   const keys = await $.store.keys()
-  const desk: Desk = { asks: [], replies: new Map(), live: new Map() }
+  const desk: Desk = { asks: [], replies: new Map(), live: new Map(), store: '' }
   await Promise.all(
     keys.map(async key => {
       if (key.startsWith(ASK)) {
@@ -152,6 +155,9 @@ export async function loadAll($: EngineInterface): Promise<Desk> {
       } else if (key.startsWith(LIVE)) {
         const v = await $.store.get(key)
         if (typeof v === 'number') desk.live.set(key.slice(LIVE.length), v)
+      } else if (key === STORE) {
+        const v = await $.store.get(key)
+        if (typeof v === 'string') desk.store = v
       }
     }),
   )

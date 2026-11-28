@@ -161,7 +161,7 @@ test('an answer without the key is 404 before its body is read, and nothing land
 })
 
 test('with the key, the ping answers; the key alone sends to its page', async () => {
-  assert.deepEqual(await (await get(`/${key}/api/ping`)).json(), { name: 'desk-hub', version: '0.2.1' })
+  assert.deepEqual(await (await get(`/${key}/api/ping`)).json(), { name: 'desk-hub', version: '0.2.2' })
   const r = await get(`/${key}`)
   assert.equal(r.status, 302)
   assert.equal(r.headers.get('location'), `${key}/`)
@@ -176,11 +176,11 @@ test('with the key, the Host check still stands', async () => {
 test('the hub proves it holds the key for a fresh nonce; the session checks the proof with the key in no argument', async () => {
   const n = 'ab'.repeat(16)
   const r = await (await get(`/api/proof?n=${n}`)).json()
-  assert.deepEqual(r, { name: 'desk-hub', version: '0.2.1', proof: createHash('sha256').update(`desk-hub:${key}:${n}`).digest('hex') })
+  assert.deepEqual(r, { name: 'desk-hub', version: '0.2.2', proof: createHash('sha256').update(`desk-hub:${key}:${n}`).digest('hex') })
   const argv = provenPing(BASE, join(dir, 'secret'), 2)
   assert.equal(argv.some(a => a.includes(key)), false)
   const out = await run(argv)
-  assert.equal(JSON.parse(out.stdout).version, '0.2.1')
+  assert.equal(JSON.parse(out.stdout).version, '0.2.2')
   assert.equal(JSON.parse(out.stdout).name, 'desk-hub')
 })
 

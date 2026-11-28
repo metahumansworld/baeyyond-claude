@@ -44,6 +44,7 @@ import {
   MARK_MS,
   POLL_MS,
   REPLY,
+  STORE,
   ago,
   contextBlock,
   isAsk,
@@ -168,6 +169,10 @@ const quiet = (p: Promise<unknown>) => void p.catch(() => undefined)
 const newId = (now: number) =>
   'a' + now.toString(36).slice(-5) + Math.floor(Math.random() * 1296).toString(36).padStart(2, '0')
 
+/** A name for a store that has none: the time, and six random characters. */
+const newStoreName = (now: number) =>
+  'st' + now.toString(36) + Math.floor(Math.random() * 36 ** 6).toString(36).padStart(6, '0')
+
 // ── Waiting on you ──────────────────────────────────────────────────────────────────────────
 
 /** Close an open ask; the ask as it was, or undefined when it was not open. */
@@ -225,16 +230,22 @@ async function takeFromHub($: Engine, all: Desk, now: number): Promise<void> {
   }
 }
 
-/** This session's feed to the hub, written when it changes and every ten seconds. */
+/**
+ * Whether a thing last done at `at` is due again: its span has passed, or the clock is behind `at`. A clock
+ * set back must not hold a session still until it has caught up with the session's own last time.
+ */
+const due = (now: number, at: number, every: number) => now - at >= every || now < at
+
+/** This session's feed to the hub, written when it changes, every ten seconds, and when the clock is behind its last stamp. */
 async function feedHub($: Engine, all: Desk, now: number): Promise<void> {
-  if (now - desk.sitesAt >= FEED_MS) {
+  if (due(now, desk.sitesAt, FEED_MS)) {
     desk.sitesAt = now
     desk.sites = sitesOf(await servedByDesk($), desk.sid)
   }
   const me = { sid: desk.sid, cwd: desk.cwd, running: desk.inTurn, idleSince: desk.idleSince, taken: desk.taken }
   const feed = feedOf(all, me, desk.sites, now)
   const sig = JSON.stringify(feed)
-  if (sig === desk.feedSig && now - desk.feedAt < FEED_MS) return
+  if (sig === desk.feedSig && !due(now, desk.feedAt, FEED_MS)) return
   await $.fs.write(`${desk.hubDir}/feeds/${desk.sid.replace(/[^A-Za-z0-9_-]/g, '_')}.json`, JSON.stringify({ ...feed, at: now }))
   desk.feedSig = sig
   desk.feedAt = now
@@ -317,11 +328,25 @@ async function passes($: Engine): Promise<void> {
 
 async function pass($: Engine): Promise<void> {
   const now = await $.clock.now()
-  if (now - desk.markedAt >= MARK_MS) {
+  if (due(now, desk.markedAt, MARK_MS)) {
     desk.markedAt = now
     await $.store.set(LIVE + desk.sid, now)
   }
   const all = await loadAll($)
+  if (all.store === '') {
+    try {
+      // the read of the keys found no name: ask for it by its key, so one that read missed is never written over
+      let named = await $.store.get(STORE)
+      if (typeof named !== 'string' || named === '') {
+        // the store has none: make one, and use what the store then holds, which may be another session's
+        await $.store.set(STORE, newStoreName(now))
+        named = await $.store.get(STORE)
+      }
+      if (typeof named === 'string') all.store = named
+    } catch {
+      // no name this pass: the feed goes out without one, and the next pass tries again
+    }
+  }
   if (desk.hubDir !== '') {
     try {
       await takeFromHub($, all, now)
@@ -338,6 +363,7 @@ async function pass($: Engine): Promise<void> {
     if (ask.state !== 'open') continue
     await deliver($, id, r.text)
     ask.state = 'replied'
+    ask.closedAt = now
   }
   for (const a of all.asks) {
     if (a.state !== 'open' && desk.notified.delete(a.id)) void $.ui.cancelNotify('desk:' + a.id)

@@ -1,12 +1,54 @@
-// The hub's view of every session, made from the feeds the sessions write. Pure, so it is tested alone.
+// The hub's view of every session, made from the feeds the sessions write. Pure, so it is tested alone
+// (hooks/state.test.ts).
 //
-// Each session running this desk writes feeds/<sid>.json: when it wrote, its folder, whether a turn
-// runs, the asks it reads from the shared store, replies left for other sessions, the marks of
-// sessions it saw, its served sites, and the answers from the hub it has taken. The newest feed
-// that holds an ask says how that ask stands.
+// Each session running this desk writes feeds/<sid>.json: when it wrote, the name of the store it
+// reads, its folder, whether a turn runs, the asks it reads from that store, replies left for other
+// sessions, the marks of sessions it saw, its served sites, and the answers from the hub it has taken.
+//
+// How an ask stands. A feed is one session's reading of its store when it wrote, and the feed of a
+// session that has ended is never written again. So only current feeds are believed: in each store,
+// those written within CURRENT_MS of that store's newest feed. An ask is shown only if a current feed
+// holds it, and the newest of those says how it stands. An ask only older feeds hold is not shown: a
+// newer reading of its store no longer has it. Current is counted from the newest feed and not from
+// the clock, so with every session closed the last reading still shows; and per store, so a session
+// of one store never makes the feeds of another old.
+//
+// A feed that names no store (a session on 0.2.1 or older, or a file one left) is counted against
+// the newest of all feeds, and never makes a named feed old. So while sessions on 0.2.1 or older are
+// the only ones open, the named feed of a session that ended is still believed.
+//
+// A stamp more than AHEAD_MS ahead of the hub's clock was written before the clock went back. Its
+// file may be an open session's (one writes again at its next poll; one on 0.2.1 or older with
+// nothing new to say, not until the clock has caught up with its stamp), so it is believed too: the
+// feeds that are ahead and those that are not are each counted against the newest of their own
+// side. Where both
+// sides hold an ask, a feed that is not ahead says how it stands: whatever was written since the
+// clock went back is on that side.
 
 /** A feed this new means its session is open and reads the hub's answers. */
 export const FRESH_MS = 30_000
+/**
+ * A feed written within this long of its store's newest feed is current: its asks are believed.
+ *
+ * Two fresh spans. A session writes its feed when it changes and at
+ * least every ten seconds (FEED_MS in hooks/hub.ts), so a minute lets an open session miss a few beats
+ * without its asks leaving the page. And the stamp is taken before the store is read, so of two
+ * sessions writing in the same moment the one stamped later may have read first: a new ask can be in
+ * the older of two feeds, which is why the newest alone is not enough.
+ *
+ * It must stay well under the half hour a closed ask rides in live feeds (FEED_RECENT_MS in
+ * hooks/hub.ts). On every route a closed ask stays in the store with its closing time, a reply the
+ * asker takes from the store included, so it does ride as closed for that half hour. A feed within the
+ * slack of the newest was then written after any ask that live feeds have let go was closed, and
+ * cannot hold it as open.
+ */
+export const CURRENT_MS = 2 * FRESH_MS
+/**
+ * A stamp further ahead of the hub's clock than this was written before the clock went back, and is
+ * counted among the stamps that are ahead. Up to this it is a session's own jitter, and is read as
+ * written now.
+ */
+export const AHEAD_MS = 5000
 /** A session's mark this new means it is open (an older desk, which writes no feed). */
 export const LIVE_MS = 90_000
 /** Closed asks stay on the page this long, folded under the session. */
@@ -41,6 +83,7 @@ export function cleanFeed(v) {
     sid: v.sid.slice(0, 80),
     at: v.at,
     version: str(v.version, 20),
+    store: str(v.store, 80),
     cwd: str(v.cwd, 500),
     running: v.running === true,
     idleSince: num(v.idleSince),
@@ -110,18 +153,44 @@ export function routeInbox(inbox, feeds, now) {
   return { inbox: out, changed }
 }
 
+/**
+ * The feeds whose asks are believed, in the order they are believed in: on each side of the clock,
+ * ahead and not, those within CURRENT_MS of the newest feed of their store on that side; and of the
+ * feeds that name no store, those within CURRENT_MS of the newest of all feeds on their side.
+ */
+function currentFeeds(feeds, now) {
+  const ahead = f => f.at - now > AHEAD_MS
+  // a stamp a little ahead of the clock is read as written now; one further ahead is taken as it is
+  const wrote = f => (ahead(f) ? f.at : Math.min(f.at, now))
+  // every feed that is not ahead before any that is (it was written since the clock went back), then
+  // newer first, and equal times by the stamp itself
+  const ranked = [...feeds].sort((x, y) => Number(ahead(x)) - Number(ahead(y)) || wrote(y) - wrote(x) || y.at - x.at)
+  // the newest on each side, of all feeds and of each store: a feed that names no store has the empty
+  // name, so its own group is all the feeds of its side
+  const group = (f, store) => (ahead(f) ? 'a' : 'n') + store
+  const newestOf = new Map()
+  for (const f of ranked) for (const g of [group(f, ''), group(f, f.store)]) if (!newestOf.has(g)) newestOf.set(g, f)
+  return ranked.filter(f => {
+    const newest = newestOf.get(group(f, f.store))
+    return f === newest || wrote(newest) - wrote(f) < CURRENT_MS
+  })
+}
+
 /** Everything the page draws. */
 export function stateOf({ feeds, inbox, now, home, version }) {
   const sorted = [...feeds].sort((x, y) => y.at - x.at)
   const asks = new Map()
   const pending = new Map()
   const live = new Map()
-  for (const f of sorted) {
+  for (const f of currentFeeds(feeds, now)) {
     for (const a of f.asks) {
+      // the first feed that holds an ask says how it stands
       if (asks.has(a.id)) continue
       asks.set(a.id, a)
       if (f.pending[a.id] !== undefined) pending.set(a.id, f.pending[a.id])
     }
+  }
+  for (const f of sorted) {
     for (const [sid, at] of Object.entries(f.live)) live.set(sid, Math.max(live.get(sid) ?? 0, at))
     live.set(f.sid, Math.max(live.get(f.sid) ?? 0, f.at))
   }
