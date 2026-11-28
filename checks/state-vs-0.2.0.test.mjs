@@ -63,7 +63,7 @@ const ask = (id, sessionId, over = {}) => ({
 
 /** A feed as the hub holds it, naming the one store every feed here reads. */
 const feed = (sid, at, asks = [], over = {}) =>
-  cleanFeed({ v: 1, sid, version: '0.2.2', store: 'st-one', cwd: `${HOME}/work`, running: false, idleSince: at - MIN, asks, pending: {}, live: {}, sites: [], taken: [], at, ...over })
+  cleanFeed({ v: 1, sid, version: '0.2.3', store: 'st-one', cwd: `${HOME}/work`, running: false, idleSince: at - MIN, asks, pending: {}, live: {}, sites: [], taken: [], at, ...over })
 
 const shown = st => Object.fromEntries(st.sessions.flatMap(s => s.asks.map(a => [a.id, a.state])))
 

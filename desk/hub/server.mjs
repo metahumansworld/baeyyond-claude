@@ -34,7 +34,7 @@ import { KEY_MAX_AGE_MS, digest, isNonce, keyLine, newKey, phonePort, proofOf, u
 import { canAnswer, cleanFeed, routeInbox, stateOf } from './state.mjs'
 
 /** Kept equal to HUB_VERSION in hooks/hub.ts: a session replaces a hub older than itself. */
-export const VERSION = '0.2.2'
+export const VERSION = '0.2.3'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const STEP_MS = 2000
@@ -144,7 +144,8 @@ let owner = { login: '', dns: '', at: 0 }
 
 function tailscaleStatus() {
   return new Promise((resolve, reject) => {
-    execFile(TAILSCALE, ['status', '--json'], { timeout: 10_000, maxBuffer: 8 << 20 }, (err, out) =>
+    // TAILSCALE_BE_CLI: without a terminal or a shell in its environment the Mac program starts as the app
+    execFile(TAILSCALE, ['status', '--json'], { timeout: 10_000, maxBuffer: 8 << 20, env: { ...process.env, TAILSCALE_BE_CLI: '1' } }, (err, out) =>
       err ? reject(err) : resolve(out),
     )
   })

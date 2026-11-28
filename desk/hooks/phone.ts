@@ -114,21 +114,39 @@ export function portOf(text: string): number {
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0
 }
 
+/**
+ * Tailscale's Mac program answers as a command only when its environment holds a terminal or a
+ * shell (TERM or SHLVL). A session's own process can hold neither, and the program then takes the
+ * run for a start of the app: it prints "The Tailscale GUI failed to start" and exits 0. This
+ * variable makes it a command wherever it is run from.
+ */
+export const AS_COMMAND = { TAILSCALE_BE_CLI: '1' }
+
 function ts($: EngineInterface, args: string[]) {
-  return $.process.run([TAILSCALE, ...args], { timeoutMs: 20_000 })
+  return $.process.run([TAILSCALE, ...args], { timeoutMs: 20_000, env: AS_COMMAND })
+}
+
+/** What Tailscale printed, read as JSON; when it printed words, an error that says which words. */
+export function dataOf(what: string, text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    const first = (text.trim().split('\n')[0] ?? '').slice(0, 160)
+    throw new Error(`tailscale ${what} answered in words, not data: ${first}`)
+  }
 }
 
 async function config($: EngineInterface): Promise<ServeConfig> {
   const r = await ts($, ['serve', 'status', '--json'])
   if (r.exitCode !== 0) throw new Error(`tailscale serve status: ${(r.stderr || r.stdout).trim()}`)
   const text = r.stdout.trim()
-  return text === '' ? {} : (JSON.parse(text) as ServeConfig)
+  return text === '' ? {} : (dataOf('serve status', text) as ServeConfig)
 }
 
 async function dnsName($: EngineInterface): Promise<string> {
   const r = await ts($, ['status', '--json'])
   if (r.exitCode !== 0) throw new Error(`tailscale status: ${(r.stderr || r.stdout).trim()}`)
-  const self = (JSON.parse(r.stdout) as { Self?: { DNSName?: string; Online?: boolean } }).Self
+  const self = (dataOf('status', r.stdout) as { Self?: { DNSName?: string; Online?: boolean } }).Self
   const name = (self?.DNSName ?? '').replace(/\.$/, '')
   if (name === '') throw new Error('Tailscale has no name for this Mac; is it signed in?')
   return name

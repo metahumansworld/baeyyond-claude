@@ -50,7 +50,7 @@ const ask = (id: string, sessionId: string, over: Partial<Ask> = {}): Ask => ({
 
 /** A feed as the hub holds it: through cleanFeed, as server.mjs reads a feed file. */
 const feed = (sid: string, at: number, asks: Ask[] = [], over: Record<string, unknown> = {}): HubFeed =>
-  cleanFeed({ v: 1, sid, version: '0.2.2', store: STORE, cwd: `${HOME}/work`, running: false, idleSince: at - MIN, asks, pending: {}, live: {}, sites: [], taken: [], at, ...over })
+  cleanFeed({ v: 1, sid, version: '0.2.3', store: STORE, cwd: `${HOME}/work`, running: false, idleSince: at - MIN, asks, pending: {}, live: {}, sites: [], taken: [], at, ...over })
 
 /** The same from a session on 0.2.0, which names no store. */
 const unnamed = (sid: string, at: number, asks: Ask[] = [], over: Record<string, unknown> = {}): HubFeed =>

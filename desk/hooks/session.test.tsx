@@ -31,8 +31,11 @@ const SESSION_PANE = {
 
 type On = Parameters<TestBody>[1]
 
+/** What a run of the fake Tailscale was given as environment, and words it prints in place of its JSON. */
+type Fake = { envs?: (Record<string, string> | undefined)[]; words?: string }
+
 /** The engine under the mod, with a fake Tailscale: `argvs` records every command the mod ran. */
-function engine(on: On, argvs: string[][], serve: { cfg: typeof CONFIG | Record<string, unknown> }) {
+function engine(on: On, argvs: string[][], serve: { cfg: typeof CONFIG | Record<string, unknown> }, fake: Fake = {}) {
   let t = 9_000_000
   const mem = new Map<string, unknown>()
   on('store.keys', () => ({ value: [...mem.keys()] }))
@@ -69,6 +72,8 @@ function engine(on: On, argvs: string[][], serve: { cfg: typeof CONFIG | Record<
     }
     if (argv[0] === 'curl') return ok('<html>hi</html>\n__status__200')
     const sub = argv.slice(1).join(' ')
+    if (argv[0]?.endsWith('/Tailscale')) fake.envs?.push(e.init?.env)
+    if (fake.words !== undefined && sub.endsWith('status --json')) return ok(fake.words)
     if (sub === 'serve status --json') return ok(JSON.stringify(serve.cfg))
     if (sub === 'status --json') return ok(JSON.stringify({ Self: { DNSName: 'mac.tail.ts.net.', Online: true } }))
     if (sub.startsWith('serve --bg --https=')) {
@@ -239,4 +244,24 @@ test('nothing listening: no serve, and the pane says why', async ($, on) => {
   const said = await $.command.run({ command: 'phone', args: '9999' } as never)
   expect(String(said.text)).toBe('Not sent: nothing listens on :9999 on this Mac.')
   expect(argvs.some(a => a[0]?.endsWith('/Tailscale'))).toBe(false)
+})
+
+test('Tailscale is run as a command wherever the session runs: every run carries TAILSCALE_BE_CLI', async ($, on) => {
+  const argvs: string[][] = []
+  const envs: (Record<string, string> | undefined)[] = []
+  engine(on, argvs, { cfg: CONFIG as Record<string, unknown> }, { envs })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'phone', args: '5173' } as never)
+  // the serve config, the Mac's name, and the serve itself
+  expect(envs.length).toBeGreaterThan(2)
+  expect(envs.every(e => e?.TAILSCALE_BE_CLI === '1')).toBe(true)
+})
+
+test('Tailscale printing words in place of its data is said as it is, and nothing is served', async ($, on) => {
+  const argvs: string[][] = []
+  engine(on, argvs, { cfg: CONFIG }, { words: 'The Tailscale GUI failed to start: no session.\nmore\n' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const said = await $.command.run({ command: 'phone', args: '5173' } as never)
+  expect(String(said.text)).toBe('Not sent: tailscale serve status answered in words, not data: The Tailscale GUI failed to start: no session.')
+  expect(argvs.some(a => a.includes('--bg'))).toBe(false)
 })

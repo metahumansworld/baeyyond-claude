@@ -20,7 +20,7 @@ import type { Desk } from './asks'
 
 export const HUB_PORT = 4791
 /** Kept equal to VERSION in hub/server.mjs: a session replaces a hub older than itself. */
-export const HUB_VERSION = '0.2.2'
+export const HUB_VERSION = '0.2.3'
 /** A feed is written when it changes, and at least this often, so the hub knows the session is open. */
 export const FEED_MS = 10_000
 /** How often a session checks that the hub runs. */
